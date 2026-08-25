@@ -9,7 +9,7 @@
 **Issue:** Client-side premium entitlement bypass  
 **Impact:** Premium state can be forced entirely on-device without a valid subscription, successful StoreKit transaction, or server-issued premium entitlement.
 
-During authorized security testing of YarnPal 1.51, the application's premium authorization flow was found to rely on client-side Boolean entitlement checks exposed through its account frameworks.
+During security testing of YarnPal 1.51, the application's premium authorization flow was found to rely on client-side Boolean entitlement checks exposed through its account frameworks.
 
 By modifying the return values of several client-side entitlement methods, YarnPal accepts the local process as a premium account and exposes premium functionality without requiring successful server-side verification.
 
