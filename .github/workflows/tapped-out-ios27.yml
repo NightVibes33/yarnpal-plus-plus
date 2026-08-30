@@ -36,11 +36,36 @@ jobs:
       - name: Patch client to current Project Springfield preservation endpoints
         working-directory: upstream-tsto
         run: |
-          python3 run_cli.py ipa \
-            --profile Beta \
-            --file "Original Files/tsto_original.ipa" \
-            --appname "Tapped Out" \
-            --version 4.69.5
+          python3 - <<'PY'
+          import sys, types
+
+          class ConsoleMessageBox:
+              @staticmethod
+              def showinfo(title, message): print(f"[INFO] {title}: {message}")
+              @staticmethod
+              def showerror(title, message): raise RuntimeError(f"{title}: {message}")
+              @staticmethod
+              def showwarning(title, message): print(f"[WARN] {title}: {message}")
+              @staticmethod
+              def askyesno(title, message): return True
+
+          tkinter = types.ModuleType("tkinter")
+          tkinter.messagebox = ConsoleMessageBox
+          sys.modules["tkinter"] = tkinter
+
+          from modules.ios import run_ipa_script
+
+          run_ipa_script(
+              "Original Files/tsto_original.ipa",
+              "https://test.pjtsto.com/",
+              "https://cdn.projectspringfield.com/static/",
+              "com.ea.simpsonssocial.inc2",
+              "Tapped Out",
+              "4.69.5",
+              None,
+              print,
+          )
+          PY
           test -f Tapped_Out.ipa
           cp Tapped_Out.ipa ../project-springfield-4.69.5.ipa
 
@@ -53,7 +78,7 @@ jobs:
       - name: Embed offline premium profile contract
         run: |
           python3 - <<'PY'
-          import json, plistlib, tempfile, zipfile
+          import plistlib, tempfile, zipfile
           from pathlib import Path
 
           ipa = Path('Tapped-Out-4.69.5-iPhone16-iOS27-unsigned.ipa')
