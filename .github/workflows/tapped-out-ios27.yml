@@ -1,4 +1,4 @@
-name: Tapped Out iOS 27
+name: Tapped Out 4.69.5 Embedded Offline Server
 
 on:
   push:
@@ -12,106 +12,150 @@ permissions:
 jobs:
   build:
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     steps:
       - name: Checkout workbench
         uses: actions/checkout@v4
 
-      - name: Probe current Project Springfield distribution
+      - name: Fetch 4.69.5 preservation input and protocol configs
         shell: bash
         run: |
           set -euo pipefail
-          curl --fail --location --retry 3 https://teamtsto.org/ -o teamtsto.html
-          echo '=== endpoint probes ==='
-          for u in 'https://test.pjtsto.com/' 'https://cdn.projectspringfield.com/static/'; do
-            code=$(curl -L -sS -o /dev/null -w '%{http_code}' --connect-timeout 10 --max-time 20 "$u" || true)
-            echo "$u -> HTTP $code"
-            test "$code" != "000"
-          done
-
-      - name: Fetch preservation patcher and 4.69.5 IPA
-        run: |
-          set -euo pipefail
           git clone --depth 1 https://github.com/bodnjenie14/Tsto_patcher.git upstream-tsto
-          test -f "upstream-tsto/Original Files/tsto_original.ipa"
+          git clone --depth 1 https://github.com/TappedOutReborn/GameServer-Reborn.git upstream-gameserver
+          test -s "upstream-tsto/Original Files/tsto_original.ipa"
           cp "upstream-tsto/Original Files/tsto_original.ipa" input-4.69.5.ipa
           shasum -a 256 input-4.69.5.ipa | tee input-sha256.txt
 
-      - name: Verify source IPA for iPhone 16 / iOS 27
-        run: |
-          python3 tapped-out/tools/inspect_ipa.py input-4.69.5.ipa | tee source-verification.txt
-
-      - name: Scan 4.69.5 account and currency markers
-        run: |
-          python3 tapped-out/tools/scan_4695_markers.py input-4.69.5.ipa --json marker-report.json | tee marker-report.txt
-
-      - name: Patch client to Project Springfield endpoints
-        working-directory: upstream-tsto
-        run: |
-          python3 - <<'PY'
-          import sys, types
-
-          class ConsoleMessageBox:
-              @staticmethod
-              def showinfo(title, message): print(f"[INFO] {title}: {message}")
-              @staticmethod
-              def showerror(title, message): raise RuntimeError(f"{title}: {message}")
-              @staticmethod
-              def showwarning(title, message): print(f"[WARN] {title}: {message}")
-              @staticmethod
-              def askyesno(title, message): return True
-
-          tkinter = types.ModuleType("tkinter")
-          tkinter.messagebox = ConsoleMessageBox
-          sys.modules["tkinter"] = tkinter
-
-          from modules.ios import run_ipa_script
-          run_ipa_script(
-              "Original Files/tsto_original.ipa",
-              "https://test.pjtsto.com/",
-              "https://cdn.projectspringfield.com/static/",
-              "com.ea.simpsonssocial.inc2",
-              "Tapped Out",
-              "4.69.5",
-              None,
-              print,
-          )
-          PY
-          test -s Tapped_Out.ipa
-          cp Tapped_Out.ipa ../project-springfield-4.69.5.ipa
-
-      - name: Fix dead EA authentication routes
+      - name: Verify and scan source IPA
+        shell: bash
         run: |
           set -euo pipefail
-          python3 tapped-out/tools/patch_project_springfield_auth.py \
-            project-springfield-4.69.5.ipa \
-            project-springfield-4.69.5-authfixed.ipa | tee authfix-log.txt
-          mv project-springfield-4.69.5-authfixed.ipa project-springfield-4.69.5.ipa
+          python3 tapped-out/tools/inspect_ipa.py input-4.69.5.ipa | tee source-verification.txt
+          python3 tapped-out/tools/scan_4695_markers.py input-4.69.5.ipa --json marker-report.json | tee marker-report.txt
+
+      - name: Build offline protobuf configuration payloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/offline-resources
+          python3 tapped-out/offline/build_offline_payloads.py \
+            upstream-gameserver/configs/ClientConfig.json \
+            upstream-gameserver/configs/GameplayConfig.json \
+            build/offline-resources | tee payload-build.txt
+          test -s build/offline-resources/OfflineClientConfig.pb
+          test -s build/offline-resources/OfflineGameplayConfig.pb
+
+      - name: Host-test embedded server implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -fobjc-arc -fblocks -DTSTO_OFFLINE_STANDALONE \
+            tapped-out/offline/OfflineServer.m \
+            -framework Foundation \
+            -o build/offline-server-test
+          build/offline-server-test > offline-server-test.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          for i in {1..20}; do
+            if curl --fail --silent http://127.0.0.1:31337/health > health.json; then
+              break
+            fi
+            sleep 0.25
+          done
+          python3 - <<'PY'
+          import json
+          health=json.load(open('health.json'))
+          assert health['offline'] is True
+          assert health['version'] == '4.69.5'
+          PY
+          curl --fail --silent 'http://127.0.0.1:31337/connect/auth?response_type=code%20lnglv_token&authenticator_login_type=mobile_anonymous' > auth.json
+          curl --fail --silent -X POST 'http://127.0.0.1:31337/connect/token?grant_type=authorization_code&code=OFFLINE_TSTO_CODE' > token.json
+          curl --fail --silent 'http://127.0.0.1:31337/user/api/ios/getAnonUid' > anon.json
+          curl --fail --silent 'http://127.0.0.1:31337/mh/games/lobby/time' > lobby.xml
+          curl --fail --silent -X PUT 'http://127.0.0.1:31337/mh/users?applicationUserId=1000001' -o users.pb
+          curl --fail --silent 'http://127.0.0.1:31337/mh/games/bg_gameserver_plugin/protocurrency/1000000000001' -o currency.pb
+          python3 - <<'PY'
+          import json
+          auth=json.load(open('auth.json'))
+          token=json.load(open('token.json'))
+          anon=json.load(open('anon.json'))
+          assert auth['code'] == 'OFFLINE_TSTO_CODE'
+          assert auth['lnglv_token'] == 'OFFLINE_TSTO_TOKEN'
+          assert token['access_token'] == 'OFFLINE_TSTO_TOKEN'
+          assert anon['uid'] == 1000000000000
+          assert open('users.pb','rb').read()
+          assert open('currency.pb','rb').read()
+          assert b'epochMilliseconds' in open('lobby.xml','rb').read()
+          print('embedded server host tests: PASS')
+          PY
+          kill "$SERVER_PID"
+          trap - EXIT
+
+      - name: Build ARM64 iOS offline server dylib
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          CLANG="$(xcrun --sdk iphoneos --find clang)"
+          "$CLANG" -fobjc-arc -fblocks -arch arm64 \
+            -isysroot "$SDK" \
+            -miphoneos-version-min=13.0 \
+            -dynamiclib tapped-out/offline/OfflineServer.m \
+            -framework Foundation \
+            -Wl,-install_name,@executable_path/Frameworks/TSTOOffline.dylib \
+            -o build/TSTOOffline.dylib
+          file build/TSTOOffline.dylib | tee offline-dylib-file.txt
+          lipo -archs build/TSTOOffline.dylib | tee offline-dylib-archs.txt
+          test "$(cat offline-dylib-archs.txt)" = "arm64"
+
+      - name: Redirect 4.69.5 to embedded localhost server
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tapped-out/offline/patch_localhost_routes.py \
+            input-4.69.5.ipa \
+            localhost-4.69.5.ipa | tee localhost-patch.txt
+
+      - name: Inject offline server and config payloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tapped-out/offline/inject_offline_server.py \
+            localhost-4.69.5.ipa \
+            build/TSTOOffline.dylib \
+            embedded-offline-4.69.5.ipa \
+            --client-config build/offline-resources/OfflineClientConfig.pb \
+            --gameplay-config build/offline-resources/OfflineGameplayConfig.pb | tee injection-log.txt
 
       - name: Prepare unsigned iOS 27 IPA
+        shell: bash
         run: |
           set -euo pipefail
           python3 tapped-out/ios27/prepare_latest_ipa.py \
-            project-springfield-4.69.5.ipa \
-            Tapped-Out-4.69.5-iPhone16-iOS27-unsigned.ipa | tee prepare-log.txt
+            embedded-offline-4.69.5.ipa \
+            Tapped-Out-4.69.5-iPhone16-iOS27-embedded-offline.ipa | tee prepare-log.txt
 
       - name: Fix legacy iOS disk-space guard
+        shell: bash
         run: |
           set -euo pipefail
           python3 tapped-out/tools/patch_ios27_diskcheck.py \
-            Tapped-Out-4.69.5-iPhone16-iOS27-unsigned.ipa \
-            Tapped-Out-4.69.5-iPhone16-iOS27-diskfix.ipa | tee diskfix-log.txt
-          mv Tapped-Out-4.69.5-iPhone16-iOS27-diskfix.ipa Tapped-Out-4.69.5-iPhone16-iOS27-unsigned.ipa
+            Tapped-Out-4.69.5-iPhone16-iOS27-embedded-offline.ipa \
+            Tapped-Out-4.69.5-iPhone16-iOS27-embedded-offline-diskfix.ipa | tee diskfix-log.txt
+          mv Tapped-Out-4.69.5-iPhone16-iOS27-embedded-offline-diskfix.ipa \
+             Tapped-Out-4.69.5-iPhone16-iOS27-embedded-offline.ipa
 
-      - name: Embed offline premium profile contract
+      - name: Embed offline profile contract
+        shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import plistlib, tempfile, zipfile
           from pathlib import Path
 
-          ipa = Path('Tapped-Out-4.69.5-iPhone16-iOS27-unsigned.ipa')
+          ipa = Path('Tapped-Out-4.69.5-iPhone16-iOS27-embedded-offline.ipa')
           profile = Path('tapped-out/profile/offline-profile.json').read_bytes()
           with tempfile.TemporaryDirectory() as td:
               root = Path(td)
@@ -124,6 +168,7 @@ jobs:
               info_path = app / 'Info.plist'
               info = plistlib.loads(info_path.read_bytes())
               info['NVOfflineProfileResource'] = 'OfflinePremiumProfile.json'
+              info['NVOfflineServerEmbedded'] = True
               plistlib.dump(info, info_path.open('wb'), fmt=plistlib.FMT_BINARY, sort_keys=False)
               out = ipa.with_suffix('.tmp.ipa')
               with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
@@ -133,51 +178,79 @@ jobs:
               out.replace(ipa)
           PY
 
-      - name: Verify final IPA, auth routes and disk fix
+      - name: Verify embedded offline IPA
+        shell: bash
         run: |
           set -euo pipefail
-          python3 tapped-out/tools/inspect_ipa.py Tapped-Out-4.69.5-iPhone16-iOS27-unsigned.ipa | tee final-verification.txt
-          unzip -tq Tapped-Out-4.69.5-iPhone16-iOS27-unsigned.ipa
-          unzip -l Tapped-Out-4.69.5-iPhone16-iOS27-unsigned.ipa | grep OfflinePremiumProfile.json
+          IPA='Tapped-Out-4.69.5-iPhone16-iOS27-embedded-offline.ipa'
+          python3 tapped-out/tools/inspect_ipa.py "$IPA" | tee final-verification.txt
+          unzip -tq "$IPA"
+          rm -rf verify-ipa
+          unzip -q "$IPA" -d verify-ipa
+          APP="$(find verify-ipa/Payload -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -n "$APP"
+          test -s "$APP/Frameworks/TSTOOffline.dylib"
+          test -s "$APP/OfflineClientConfig.pb"
+          test -s "$APP/OfflineGameplayConfig.pb"
+          test -s "$APP/OfflinePremiumProfile.json"
+          otool -L "$APP/Tapped Out" | tee otool-main.txt
+          grep -F '@executable_path/Frameworks/TSTOOffline.dylib' otool-main.txt
+          lipo -archs "$APP/Frameworks/TSTOOffline.dylib" | tee final-dylib-archs.txt
+          test "$(cat final-dylib-archs.txt)" = 'arm64'
           python3 - <<'PY'
-          import plistlib, zipfile
-          ipa='Tapped-Out-4.69.5-iPhone16-iOS27-unsigned.ipa'
-          with zipfile.ZipFile(ipa) as z:
-              info_name=[n for n in z.namelist() if n.startswith('Payload/') and n.count('/') == 2 and n.endswith('.app/Info.plist')][0]
-              info=plistlib.loads(z.read(info_name))
-              exe=info_name.rsplit('/',1)[0]+'/'+info['CFBundleExecutable']
-              blob=z.read(exe)
-          got=blob[0x18190:0x18198]
-          expected=bytes.fromhex('20008052c0035fd6')
-          print('disk fix bytes:', got.hex())
-          if got != expected:
-              raise SystemExit('disk-space patch verification failed')
-          for dead in (b'https://auth.tnt-ea.com', b'https://nucleus.tnt-ea.com'):
-              if dead in blob:
-                  raise SystemExit(f'dead auth route remains: {dead!r}')
-          replacement=b'https://test.pjtsto.com'
-          count=blob.count(replacement)
-          print('Project Springfield auth/server host occurrences:', count)
-          if count < 3:
-              raise SystemExit(f'expected at least 3 Project Springfield host occurrences, found {count}')
-          print('dead EA auth route gate: PASS')
+          import plistlib
+          from pathlib import Path
+          apps=list(Path('verify-ipa/Payload').glob('*.app'))
+          assert len(apps)==1
+          app=apps[0]
+          info=plistlib.loads((app/'Info.plist').read_bytes())
+          exe=(app/info['CFBundleExecutable']).read_bytes()
+          assert info['CFBundleShortVersionString']=='4.69.5'
+          assert info['MayhemServerURL']=='http://127.0.0.1:31337'
+          assert info['DLCLocation']=='http://127.0.0.1:31337/dlc/'
+          assert info['NVOfflineServerEmbedded'] is True
+          assert b'@executable_path/Frameworks/TSTOOffline.dylib' in exe
+          assert exe[0x18190:0x18198] == bytes.fromhex('20008052c0035fd6')
+          for dead in (
+              b'https://auth.tnt-ea.com',
+              b'https://nucleus.tnt-ea.com',
+              b'https://syn-dir.sn.eamobile.com',
+              b'https://test.pjtsto.com',
+              b'projectspringfield.com',
+          ):
+              if dead in exe:
+                  raise SystemExit(f'external bootstrap route remains: {dead!r}')
+          dylib=(app/'Frameworks/TSTOOffline.dylib').read_bytes()
+          assert b'http://127.0.0.1:31337' in dylib
+          assert b'OFFLINE_TSTO_TOKEN' in dylib
+          print('embedded server load-command gate: PASS')
+          print('localhost route gate: PASS')
+          print('Project Springfield dependency gate: PASS')
+          print('disk-space gate: PASS')
           PY
-          shasum -a 256 Tapped-Out-4.69.5-iPhone16-iOS27-unsigned.ipa | tee final-sha256.txt
+          shasum -a 256 "$IPA" | tee final-sha256.txt
 
-      - name: Upload IPA and reports
+      - name: Upload embedded-offline IPA and reports
         uses: actions/upload-artifact@v4
         with:
-          name: Tapped-Out-4.69.5-iPhone16-iOS27-server-disk-fixed
+          name: Tapped-Out-4.69.5-iPhone16-iOS27-embedded-offline-server
           if-no-files-found: error
           retention-days: 30
           path: |
-            Tapped-Out-4.69.5-iPhone16-iOS27-unsigned.ipa
+            Tapped-Out-4.69.5-iPhone16-iOS27-embedded-offline.ipa
             input-sha256.txt
             source-verification.txt
             marker-report.json
             marker-report.txt
-            authfix-log.txt
+            payload-build.txt
+            offline-server-test.log
+            offline-dylib-file.txt
+            offline-dylib-archs.txt
+            localhost-patch.txt
+            injection-log.txt
             prepare-log.txt
             diskfix-log.txt
             final-verification.txt
+            otool-main.txt
+            final-dylib-archs.txt
             final-sha256.txt
