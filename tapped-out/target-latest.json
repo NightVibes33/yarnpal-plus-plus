@@ -1,0 +1,15 @@
+{
+  "product": "The Simpsons: Tapped Out",
+  "targetVersion": "4.69.5",
+  "platform": "iOS",
+  "deviceTarget": "iPhone 16",
+  "osTarget": "iOS 27",
+  "requiredArchitectures": ["arm64"],
+  "allowArm64eDevice": true,
+  "sourcePolicy": "User-supplied or otherwise lawfully obtained 4.69.5 IPA only",
+  "notes": [
+    "4.69.5 is the final official iOS release.",
+    "Do not use the uploaded 4.1.0 IPA as the executable base; it is armv7-only.",
+    "The preparation pipeline must reject any IPA whose main executable lacks arm64."
+  ]
+}
