@@ -95,7 +95,8 @@ def main():
         if not exe_name:
             raise SystemExit("CFBundleExecutable missing")
         exe = app / exe_name
-        blob = exe.read_bytes()
+        original_blob = exe.read_bytes()
+        blob = original_blob
 
         counts = {}
         for old, new in ROUTES.items():
@@ -108,7 +109,7 @@ def main():
             if count:
                 print(f"patched {count} x {old} -> {new}")
 
-        missing_critical = [s for s in CRITICAL if counts.get(s, 0) == 0 and s.encode() in exe.read_bytes()]
+        missing_critical = [s for s in CRITICAL if counts.get(s, 0) == 0 and s.encode() in original_blob]
         if missing_critical:
             raise SystemExit("critical route(s) were not patched: " + ", ".join(missing_critical))
 
@@ -131,13 +132,27 @@ def main():
         info["NSAppTransportSecurity"] = ats
         info["NVOfflineServerURL"] = BASE
         info["NVOfflineDLCURL"] = DLC
+        info["NVOfflineDLCImportDirectory"] = "Documents/TSTOOfflineDLC"
+
+        # Surface the app's Documents directory in Files so a lawfully-backed-up
+        # DLC tree can be copied in once and served by localhost thereafter.
+        info["UIFileSharingEnabled"] = True
+        info["LSSupportsOpeningDocumentsInPlace"] = True
+
         plistlib.dump(info, info_path.open("wb"), fmt=plistlib.FMT_BINARY, sort_keys=False)
+
+        instructions = app / "OFFLINE-DLC-IMPORT.txt"
+        instructions.write_text(
+            "Offline DLC import\n\n"
+            "After installation, launch the app once. In Files, open the app's Documents area and copy your own cached/backed-up TSTO DLC tree into TSTOOfflineDLC while preserving its directory structure. The embedded server serves those files at http://127.0.0.1:31337/dlc/.\n"
+        )
 
         repack(root, dst)
 
     print(f"wrote {dst}")
     print(f"embedded server base: {BASE}")
     print(f"embedded DLC base: {DLC}")
+    print("Files import directory: Documents/TSTOOfflineDLC")
 
 
 if __name__ == "__main__":
