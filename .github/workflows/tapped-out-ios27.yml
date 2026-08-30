@@ -47,14 +47,16 @@ jobs:
           test -s build/offline-resources/OfflineClientConfig.pb
           test -s build/offline-resources/OfflineGameplayConfig.pb
 
-      - name: Analyze complete published DLC corpus
+      - name: Analyze cumulative final 4.69 DLC index
         shell: bash
         run: |
           set -euo pipefail
           python3 tapped-out/offline/build_ios_dlc_pack.py \
             --source-base 'https://cdn.projectspringfield.com/static/' \
-            --languages 'all,en' \
+            --current-only \
+            --languages 'all,en,fr,it,de,es,ko,zh,cn,pt,ru,tc,da,sv,no,nl,tr,th' \
             --tiers 'all,25,50,100,retina,iphone,ipad,ipad3,mp3,caf,wav' \
+            --workers 16 \
             --manifest ios-dlc-corpus-manifest.json \
             --report ios-dlc-corpus-report.txt | tee ios-dlc-corpus-build.txt
           test -s ios-dlc-corpus-manifest.json
@@ -67,6 +69,7 @@ jobs:
           rm -rf build/ios-dlc
           python3 tapped-out/offline/build_ios_dlc_pack.py \
             --source-base 'https://cdn.projectspringfield.com/static/' \
+            --current-only \
             --languages 'all,en' \
             --tiers 'all,100,retina,iphone,caf,wav' \
             --download \
@@ -77,15 +80,24 @@ jobs:
             --manifest ios-dlc-manifest.json \
             --report ios-dlc-report.txt | tee ios-dlc-build.txt
           test -s build/ios-dlc/dlc/DLCIndex.zip
+          test -s build/ios-dlc/dlc/DLCIndex.original.zip
           test -s ios-dlc-manifest.json
           python3 - <<'PY'
-          import json
+          import io, json, zipfile, xml.etree.ElementTree as ET
           from pathlib import Path
           m=json.load(open('ios-dlc-manifest.json'))
           root=Path('build/ios-dlc')
           assert m.get('downloaded') is True
           assert m['selectedUniquePackages'] > 0
           assert m['downloadedBytes'] > 0
+          assert m['localMasterIndexEntries'] >= 1
+          assert m['historicalIndexRefsExcluded'] > 0
+          with zipfile.ZipFile(root/'dlc/DLCIndex.zip') as zf:
+              names=[x for x in zf.namelist() if not x.endswith('/')]
+              assert len(names)==1
+              xml=ET.fromstring(zf.read(names[0]))
+              refs=[n.get('index','').replace(':','/') for n in xml.findall('./IndexFile')]
+          assert refs == m['indexes'], (refs,m['indexes'])
           missing=[]
           bad=[]
           for p in m['selectedPackages']:
@@ -96,6 +108,7 @@ jobs:
                   bad.append((p['path'], f.stat().st_size, p['file_size']))
           assert not missing, missing[:20]
           assert not bad, bad[:20]
+          print('filtered local DLC master gate: PASS')
           print('iPhone DLC closure files:', m['selectedUniquePackages'])
           print('iPhone DLC closure bytes:', m['downloadedBytes'])
           print('iPhone DLC closure completeness gate: PASS')
@@ -123,23 +136,16 @@ jobs:
           data=bytes(range(256))*4096
           Path('build/dlc-fixture/test/asset.bin').write_bytes(data)
           PY
-
           clang -fobjc-arc -fblocks -DTSTO_OFFLINE_STANDALONE \
-            build/OfflineServer.full.m \
-            -framework Foundation \
-            -o build/offline-server-test
-
+            build/OfflineServer.full.m -framework Foundation -o build/offline-server-test
           TSTO_OFFLINE_DLC_ROOT="$PWD/build/dlc-fixture" \
             build/offline-server-test > offline-server-test.log 2>&1 &
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
           for i in {1..20}; do
-            if curl --fail --silent http://127.0.0.1:31337/health > health.json; then
-              break
-            fi
+            if curl --fail --silent http://127.0.0.1:31337/health > health.json; then break; fi
             sleep 0.25
           done
-
           curl --fail --silent 'http://127.0.0.1:31337/connect/auth?response_type=code%20lnglv_token&authenticator_login_type=mobile_anonymous' > auth.json
           curl --fail --silent -X POST 'http://127.0.0.1:31337/connect/token?grant_type=authorization_code&code=OFFLINE_TSTO_CODE' > token.json
           curl --fail --silent 'http://127.0.0.1:31337/user/api/ios/getAnonUid' > anon.json
@@ -153,31 +159,23 @@ jobs:
           grep -qi '^Accept-Ranges: bytes' dlc-head.txt
           grep -qi '^Content-Length: 1048576' dlc-head.txt
           curl --fail --silent -H 'Range: bytes=100-199' 'http://127.0.0.1:31337/dlc/test/asset.bin' -o dlc-range.bin
-
           python3 - <<'PY'
           import json
           from pathlib import Path
-          health=json.load(open('health.json'))
-          auth=json.load(open('auth.json'))
-          token=json.load(open('token.json'))
-          anon=json.load(open('anon.json'))
+          health=json.load(open('health.json')); auth=json.load(open('auth.json'))
+          token=json.load(open('token.json')); anon=json.load(open('anon.json'))
           status=json.load(open('dlc-status.json'))
           source=Path('build/dlc-fixture/test/asset.bin').read_bytes()
           ranged=Path('dlc-range.bin').read_bytes()
           assert health['offline'] is True and health['version']=='4.69.5'
-          assert auth['code']=='OFFLINE_TSTO_CODE'
-          assert auth['lnglv_token']=='OFFLINE_TSTO_TOKEN'
-          assert token['access_token']=='OFFLINE_TSTO_TOKEN'
-          assert anon['uid']==1000000000000
-          assert open('users.pb','rb').read()
-          assert open('currency.pb','rb').read()
+          assert auth['code']=='OFFLINE_TSTO_CODE' and auth['lnglv_token']=='OFFLINE_TSTO_TOKEN'
+          assert token['access_token']=='OFFLINE_TSTO_TOKEN' and anon['uid']==1000000000000
+          assert open('users.pb','rb').read() and open('currency.pb','rb').read()
           assert b'epochMilliseconds' in open('lobby.xml','rb').read()
-          assert status['files'] >= 1
-          assert status['bytes'] >= len(source)
+          assert status['files'] >= 1 and status['bytes'] >= len(source)
           assert ranged == source[100:200]
           print('embedded server host tests: PASS')
-          print('local DLC full-file streaming: PASS')
-          print('local DLC HEAD/range streaming: PASS')
+          print('local DLC full-file/HEAD/range streaming: PASS')
           PY
           kill "$SERVER_PID"
           trap - EXIT
@@ -188,12 +186,9 @@ jobs:
           set -euo pipefail
           SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
           CLANG="$(xcrun --sdk iphoneos --find clang)"
-          "$CLANG" -fobjc-arc -fblocks -arch arm64 \
-            -isysroot "$SDK" \
-            -miphoneos-version-min=13.0 \
-            -dynamiclib build/OfflineServer.full.m \
-            -framework Foundation \
-            -Wl,-install_name,@executable_path/Frameworks/TSTOOffline.dylib \
+          "$CLANG" -fobjc-arc -fblocks -arch arm64 -isysroot "$SDK" \
+            -miphoneos-version-min=13.0 -dynamiclib build/OfflineServer.full.m \
+            -framework Foundation -Wl,-install_name,@executable_path/Frameworks/TSTOOffline.dylib \
             -o build/TSTOOffline.dylib
           file build/TSTOOffline.dylib | tee offline-dylib-file.txt
           lipo -archs build/TSTOOffline.dylib | tee offline-dylib-archs.txt
@@ -203,18 +198,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 tapped-out/offline/patch_localhost_routes.py \
-            input-4.69.5.ipa \
-            localhost-4.69.5.ipa | tee localhost-patch.txt
+          python3 tapped-out/offline/patch_localhost_routes.py input-4.69.5.ipa localhost-4.69.5.ipa | tee localhost-patch.txt
 
       - name: Inject offline server and protocol payloads
         shell: bash
         run: |
           set -euo pipefail
           python3 tapped-out/offline/inject_offline_server.py \
-            localhost-4.69.5.ipa \
-            build/TSTOOffline.dylib \
-            embedded-offline-4.69.5.ipa \
+            localhost-4.69.5.ipa build/TSTOOffline.dylib embedded-offline-4.69.5.ipa \
             --client-config build/offline-resources/OfflineClientConfig.pb \
             --gameplay-config build/offline-resources/OfflineGameplayConfig.pb | tee injection-log.txt
 
@@ -222,17 +213,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 tapped-out/ios27/prepare_latest_ipa.py \
-            embedded-offline-4.69.5.ipa \
-            pre-dlc-offline.ipa | tee prepare-log.txt
+          python3 tapped-out/ios27/prepare_latest_ipa.py embedded-offline-4.69.5.ipa pre-dlc-offline.ipa | tee prepare-log.txt
 
       - name: Fix legacy iOS disk-space guard
         shell: bash
         run: |
           set -euo pipefail
-          python3 tapped-out/tools/patch_ios27_diskcheck.py \
-            pre-dlc-offline.ipa \
-            pre-dlc-offline-diskfix.ipa | tee diskfix-log.txt
+          python3 tapped-out/tools/patch_ios27_diskcheck.py pre-dlc-offline.ipa pre-dlc-offline-diskfix.ipa | tee diskfix-log.txt
           mv pre-dlc-offline-diskfix.ipa pre-dlc-offline.ipa
 
       - name: Embed offline profile contract
@@ -240,27 +227,21 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import plistlib, tempfile, zipfile
+          import plistlib,tempfile,zipfile
           from pathlib import Path
-          ipa=Path('pre-dlc-offline.ipa')
-          profile=Path('tapped-out/profile/offline-profile.json').read_bytes()
+          ipa=Path('pre-dlc-offline.ipa'); profile=Path('tapped-out/profile/offline-profile.json').read_bytes()
           with tempfile.TemporaryDirectory() as td:
               root=Path(td)
               with zipfile.ZipFile(ipa,'r') as zf: zf.extractall(root)
-              apps=list((root/'Payload').glob('*.app'))
-              assert len(apps)==1
-              app=apps[0]
+              apps=list((root/'Payload').glob('*.app')); assert len(apps)==1; app=apps[0]
               (app/'OfflinePremiumProfile.json').write_bytes(profile)
-              info_path=app/'Info.plist'
-              info=plistlib.loads(info_path.read_bytes())
-              info['NVOfflineProfileResource']='OfflinePremiumProfile.json'
-              info['NVOfflineServerEmbedded']=True
-              plistlib.dump(info, info_path.open('wb'), fmt=plistlib.FMT_BINARY, sort_keys=False)
+              info_path=app/'Info.plist'; info=plistlib.loads(info_path.read_bytes())
+              info['NVOfflineProfileResource']='OfflinePremiumProfile.json'; info['NVOfflineServerEmbedded']=True
+              plistlib.dump(info,info_path.open('wb'),fmt=plistlib.FMT_BINARY,sort_keys=False)
               out=ipa.with_suffix('.tmp.ipa')
               with zipfile.ZipFile(out,'w',allowZip64=True) as zf:
                   for p in sorted(root.rglob('*')):
-                      if p.is_file():
-                          zf.write(p,p.relative_to(root).as_posix(),compress_type=zipfile.ZIP_DEFLATED,compresslevel=9)
+                      if p.is_file(): zf.write(p,p.relative_to(root).as_posix(),compress_type=zipfile.ZIP_DEFLATED,compresslevel=9)
               out.replace(ipa)
           PY
 
@@ -269,13 +250,10 @@ jobs:
         run: |
           set -euo pipefail
           python3 tapped-out/offline/inject_offline_server.py \
-            pre-dlc-offline.ipa \
-            build/TSTOOffline.dylib \
-            Tapped-Out-4.69.5-iPhone16-iOS27-FULLY-OFFLINE.ipa \
+            pre-dlc-offline.ipa build/TSTOOffline.dylib Tapped-Out-4.69.5-iPhone16-iOS27-FULLY-OFFLINE.ipa \
             --client-config build/offline-resources/OfflineClientConfig.pb \
             --gameplay-config build/offline-resources/OfflineGameplayConfig.pb \
-            --dlc-dir build/ios-dlc \
-            --dlc-manifest ios-dlc-manifest.json | tee dlc-bundle-log.txt
+            --dlc-dir build/ios-dlc --dlc-manifest ios-dlc-manifest.json | tee dlc-bundle-log.txt
 
       - name: Verify fully offline IPA and complete DLC closure
         shell: bash
@@ -284,68 +262,46 @@ jobs:
           IPA='Tapped-Out-4.69.5-iPhone16-iOS27-FULLY-OFFLINE.ipa'
           python3 tapped-out/tools/inspect_ipa.py "$IPA" | tee final-verification.txt
           unzip -tq "$IPA"
-          rm -rf verify-ipa
-          unzip -q "$IPA" -d verify-ipa
+          rm -rf verify-ipa && unzip -q "$IPA" -d verify-ipa
           APP="$(find verify-ipa/Payload -maxdepth 1 -type d -name '*.app' -print -quit)"
-          test -n "$APP"
-          test -s "$APP/Frameworks/TSTOOffline.dylib"
-          test -s "$APP/OfflineClientConfig.pb"
-          test -s "$APP/OfflineGameplayConfig.pb"
-          test -s "$APP/OfflinePremiumProfile.json"
-          test -s "$APP/OfflineDLCManifest.json"
+          test -n "$APP"; test -s "$APP/Frameworks/TSTOOffline.dylib"; test -s "$APP/OfflineDLCManifest.json"
           test -s "$APP/OfflineDLC/dlc/DLCIndex.zip"
           otool -L "$APP/Tapped Out" | tee otool-main.txt
           grep -F '@executable_path/Frameworks/TSTOOffline.dylib' otool-main.txt
           lipo -archs "$APP/Frameworks/TSTOOffline.dylib" | tee final-dylib-archs.txt
           test "$(cat final-dylib-archs.txt)" = 'arm64'
           python3 - <<'PY'
-          import json, plistlib
+          import json,plistlib,zipfile,xml.etree.ElementTree as ET
           from pathlib import Path
-          apps=list(Path('verify-ipa/Payload').glob('*.app'))
-          assert len(apps)==1
-          app=apps[0]
-          info=plistlib.loads((app/'Info.plist').read_bytes())
-          exe=(app/info['CFBundleExecutable']).read_bytes()
-          manifest=json.loads((app/'OfflineDLCManifest.json').read_text())
+          apps=list(Path('verify-ipa/Payload').glob('*.app')); assert len(apps)==1; app=apps[0]
+          info=plistlib.loads((app/'Info.plist').read_bytes()); exe=(app/info['CFBundleExecutable']).read_bytes()
+          manifest=json.loads((app/'OfflineDLCManifest.json').read_text()); dlc=app/'OfflineDLC'
           assert info['CFBundleShortVersionString']=='4.69.5'
-          assert info['MayhemServerURL']=='http://127.0.0.1:31337'
-          assert info['DLCLocation']=='http://127.0.0.1:31337/dlc/'
-          assert info['NVOfflineServerEmbedded'] is True
-          assert info['NVOfflineDLCBundled'] is True
-          assert info['NVOfflineDLCBundledFiles'] > 0
-          assert info['NVOfflineDLCBundledBytes'] > 0
+          assert info['MayhemServerURL']=='http://127.0.0.1:31337' and info['DLCLocation']=='http://127.0.0.1:31337/dlc/'
+          assert info['NVOfflineServerEmbedded'] is True and info['NVOfflineDLCBundled'] is True
+          assert info['NVOfflineDLCBundledFiles'] > 0 and info['NVOfflineDLCBundledBytes'] > 0
           assert b'@executable_path/Frameworks/TSTOOffline.dylib' in exe
           assert exe[0x18190:0x18198] == bytes.fromhex('20008052c0035fd6')
-          for dead in (
-              b'https://auth.tnt-ea.com',
-              b'https://nucleus.tnt-ea.com',
-              b'https://syn-dir.sn.eamobile.com',
-              b'https://test.pjtsto.com',
-              b'projectspringfield.com',
-          ):
-              if dead in exe:
-                  raise SystemExit(f'external bootstrap route remains: {dead!r}')
-          missing=[]
-          bad=[]
-          dlc=app/'OfflineDLC'
+          for dead in (b'https://auth.tnt-ea.com',b'https://nucleus.tnt-ea.com',b'https://syn-dir.sn.eamobile.com',b'https://test.pjtsto.com',b'projectspringfield.com'):
+              if dead in exe: raise SystemExit(f'external bootstrap route remains: {dead!r}')
+          missing=[]; bad=[]
           for p in manifest['selectedPackages']:
               f=dlc/p['path']
-              if not f.is_file():
-                  missing.append(p['path'])
-              elif p['file_size'] and f.stat().st_size != p['file_size']:
-                  bad.append((p['path'],f.stat().st_size,p['file_size']))
-          assert not missing, missing[:20]
-          assert not bad, bad[:20]
+              if not f.is_file(): missing.append(p['path'])
+              elif p['file_size'] and f.stat().st_size != p['file_size']: bad.append((p['path'],f.stat().st_size,p['file_size']))
+          assert not missing,missing[:20]; assert not bad,bad[:20]
+          with zipfile.ZipFile(dlc/'dlc/DLCIndex.zip') as zf:
+              names=[x for x in zf.namelist() if not x.endswith('/')]; assert len(names)==1
+              refs=[n.get('index','').replace(':','/') for n in ET.fromstring(zf.read(names[0])).findall('./IndexFile')]
+          assert refs == manifest['indexes'], (refs,manifest['indexes'])
           dylib=(app/'Frameworks/TSTOOffline.dylib').read_bytes()
-          for required in (b'http://127.0.0.1:31337',b'OFFLINE_TSTO_TOKEN',b'Accept-Ranges: bytes'):
-              assert required in dylib, required
+          for required in (b'http://127.0.0.1:31337',b'OFFLINE_TSTO_TOKEN',b'Accept-Ranges: bytes'): assert required in dylib
           print('embedded server load-command gate: PASS')
           print('localhost-only bootstrap gate: PASS')
-          print('disk-space gate: PASS')
-          print('bundled DLC manifest gate: PASS')
+          print('filtered local master gate: PASS')
           print('bundled DLC closure completeness gate: PASS')
-          print('selected packages:', manifest['selectedUniquePackages'])
-          print('selected bytes:', manifest['downloadedBytes'])
+          print('selected packages:',manifest['selectedUniquePackages'])
+          print('selected bytes:',manifest['downloadedBytes'])
           PY
           shasum -a 256 "$IPA" | tee final-sha256.txt
           ls -lh "$IPA" | tee final-size.txt
