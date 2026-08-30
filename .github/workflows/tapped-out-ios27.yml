@@ -1,4 +1,4 @@
-name: Tapped Out 4.69.5 Embedded Offline Server
+name: Tapped Out 4.69.5 Fully Offline iPhone Build
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
 jobs:
   build:
     runs-on: macos-15
-    timeout-minutes: 25
+    timeout-minutes: 120
 
     steps:
       - name: Checkout workbench
@@ -46,6 +46,61 @@ jobs:
             build/offline-resources | tee payload-build.txt
           test -s build/offline-resources/OfflineClientConfig.pb
           test -s build/offline-resources/OfflineGameplayConfig.pb
+
+      - name: Analyze complete published DLC corpus
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tapped-out/offline/build_ios_dlc_pack.py \
+            --source-base 'https://cdn.projectspringfield.com/static/' \
+            --languages 'all,en' \
+            --tiers 'all,25,50,100,retina,iphone,ipad,ipad3,mp3,caf,wav' \
+            --manifest ios-dlc-corpus-manifest.json \
+            --report ios-dlc-corpus-report.txt | tee ios-dlc-corpus-build.txt
+          test -s ios-dlc-corpus-manifest.json
+          test -s ios-dlc-corpus-report.txt
+
+      - name: Materialize complete iPhone 4.69.5 DLC closure
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf build/ios-dlc
+          python3 tapped-out/offline/build_ios_dlc_pack.py \
+            --source-base 'https://cdn.projectspringfield.com/static/' \
+            --languages 'all,en' \
+            --tiers 'all,100,retina,iphone,caf,wav' \
+            --download \
+            --workers 16 \
+            --retries 5 \
+            --max-bytes 5000000000 \
+            --output-dir build/ios-dlc \
+            --manifest ios-dlc-manifest.json \
+            --report ios-dlc-report.txt | tee ios-dlc-build.txt
+          test -s build/ios-dlc/dlc/DLCIndex.zip
+          test -s ios-dlc-manifest.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          m=json.load(open('ios-dlc-manifest.json'))
+          root=Path('build/ios-dlc')
+          assert m.get('downloaded') is True
+          assert m['selectedUniquePackages'] > 0
+          assert m['downloadedBytes'] > 0
+          missing=[]
+          bad=[]
+          for p in m['selectedPackages']:
+              f=root/p['path']
+              if not f.is_file():
+                  missing.append(p['path'])
+              elif p['file_size'] and f.stat().st_size != p['file_size']:
+                  bad.append((p['path'], f.stat().st_size, p['file_size']))
+          assert not missing, missing[:20]
+          assert not bad, bad[:20]
+          print('iPhone DLC closure files:', m['selectedUniquePackages'])
+          print('iPhone DLC closure bytes:', m['downloadedBytes'])
+          print('iPhone DLC closure completeness gate: PASS')
+          PY
+          du -sh build/ios-dlc | tee ios-dlc-du.txt
 
       - name: Prepare production local DLC server source
         shell: bash
@@ -85,20 +140,12 @@ jobs:
             sleep 0.25
           done
 
-          python3 - <<'PY'
-          import json
-          health=json.load(open('health.json'))
-          assert health['offline'] is True
-          assert health['version'] == '4.69.5'
-          PY
-
           curl --fail --silent 'http://127.0.0.1:31337/connect/auth?response_type=code%20lnglv_token&authenticator_login_type=mobile_anonymous' > auth.json
           curl --fail --silent -X POST 'http://127.0.0.1:31337/connect/token?grant_type=authorization_code&code=OFFLINE_TSTO_CODE' > token.json
           curl --fail --silent 'http://127.0.0.1:31337/user/api/ios/getAnonUid' > anon.json
           curl --fail --silent 'http://127.0.0.1:31337/mh/games/lobby/time' > lobby.xml
           curl --fail --silent -X PUT 'http://127.0.0.1:31337/mh/users?applicationUserId=1000001' -o users.pb
           curl --fail --silent 'http://127.0.0.1:31337/mh/games/bg_gameserver_plugin/protocurrency/1000000000001' -o currency.pb
-
           curl --fail --silent 'http://127.0.0.1:31337/offline/dlc/status' > dlc-status.json
           curl --fail --silent 'http://127.0.0.1:31337/dlc/test/asset.bin' -o dlc-full.bin
           cmp build/dlc-fixture/test/asset.bin dlc-full.bin
@@ -110,16 +157,18 @@ jobs:
           python3 - <<'PY'
           import json
           from pathlib import Path
+          health=json.load(open('health.json'))
           auth=json.load(open('auth.json'))
           token=json.load(open('token.json'))
           anon=json.load(open('anon.json'))
           status=json.load(open('dlc-status.json'))
           source=Path('build/dlc-fixture/test/asset.bin').read_bytes()
           ranged=Path('dlc-range.bin').read_bytes()
-          assert auth['code'] == 'OFFLINE_TSTO_CODE'
-          assert auth['lnglv_token'] == 'OFFLINE_TSTO_TOKEN'
-          assert token['access_token'] == 'OFFLINE_TSTO_TOKEN'
-          assert anon['uid'] == 1000000000000
+          assert health['offline'] is True and health['version']=='4.69.5'
+          assert auth['code']=='OFFLINE_TSTO_CODE'
+          assert auth['lnglv_token']=='OFFLINE_TSTO_TOKEN'
+          assert token['access_token']=='OFFLINE_TSTO_TOKEN'
+          assert anon['uid']==1000000000000
           assert open('users.pb','rb').read()
           assert open('currency.pb','rb').read()
           assert b'epochMilliseconds' in open('lobby.xml','rb').read()
@@ -158,7 +207,7 @@ jobs:
             input-4.69.5.ipa \
             localhost-4.69.5.ipa | tee localhost-patch.txt
 
-      - name: Inject offline server and config payloads
+      - name: Inject offline server and protocol payloads
         shell: bash
         run: |
           set -euo pipefail
@@ -175,17 +224,16 @@ jobs:
           set -euo pipefail
           python3 tapped-out/ios27/prepare_latest_ipa.py \
             embedded-offline-4.69.5.ipa \
-            Tapped-Out-4.69.5-iPhone16-iOS27-embedded-offline.ipa | tee prepare-log.txt
+            pre-dlc-offline.ipa | tee prepare-log.txt
 
       - name: Fix legacy iOS disk-space guard
         shell: bash
         run: |
           set -euo pipefail
           python3 tapped-out/tools/patch_ios27_diskcheck.py \
-            Tapped-Out-4.69.5-iPhone16-iOS27-embedded-offline.ipa \
-            Tapped-Out-4.69.5-iPhone16-iOS27-embedded-offline-diskfix.ipa | tee diskfix-log.txt
-          mv Tapped-Out-4.69.5-iPhone16-iOS27-embedded-offline-diskfix.ipa \
-             Tapped-Out-4.69.5-iPhone16-iOS27-embedded-offline.ipa
+            pre-dlc-offline.ipa \
+            pre-dlc-offline-diskfix.ipa | tee diskfix-log.txt
+          mv pre-dlc-offline-diskfix.ipa pre-dlc-offline.ipa
 
       - name: Embed offline profile contract
         shell: bash
@@ -194,35 +242,46 @@ jobs:
           python3 - <<'PY'
           import plistlib, tempfile, zipfile
           from pathlib import Path
-
-          ipa = Path('Tapped-Out-4.69.5-iPhone16-iOS27-embedded-offline.ipa')
-          profile = Path('tapped-out/profile/offline-profile.json').read_bytes()
+          ipa=Path('pre-dlc-offline.ipa')
+          profile=Path('tapped-out/profile/offline-profile.json').read_bytes()
           with tempfile.TemporaryDirectory() as td:
-              root = Path(td)
-              with zipfile.ZipFile(ipa, 'r') as zf:
-                  zf.extractall(root)
-              apps = list((root / 'Payload').glob('*.app'))
-              assert len(apps) == 1, apps
-              app = apps[0]
-              (app / 'OfflinePremiumProfile.json').write_bytes(profile)
-              info_path = app / 'Info.plist'
-              info = plistlib.loads(info_path.read_bytes())
-              info['NVOfflineProfileResource'] = 'OfflinePremiumProfile.json'
-              info['NVOfflineServerEmbedded'] = True
+              root=Path(td)
+              with zipfile.ZipFile(ipa,'r') as zf: zf.extractall(root)
+              apps=list((root/'Payload').glob('*.app'))
+              assert len(apps)==1
+              app=apps[0]
+              (app/'OfflinePremiumProfile.json').write_bytes(profile)
+              info_path=app/'Info.plist'
+              info=plistlib.loads(info_path.read_bytes())
+              info['NVOfflineProfileResource']='OfflinePremiumProfile.json'
+              info['NVOfflineServerEmbedded']=True
               plistlib.dump(info, info_path.open('wb'), fmt=plistlib.FMT_BINARY, sort_keys=False)
-              out = ipa.with_suffix('.tmp.ipa')
-              with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+              out=ipa.with_suffix('.tmp.ipa')
+              with zipfile.ZipFile(out,'w',allowZip64=True) as zf:
                   for p in sorted(root.rglob('*')):
                       if p.is_file():
-                          zf.write(p, p.relative_to(root).as_posix())
+                          zf.write(p,p.relative_to(root).as_posix(),compress_type=zipfile.ZIP_DEFLATED,compresslevel=9)
               out.replace(ipa)
           PY
 
-      - name: Verify embedded offline IPA and DLC import layer
+      - name: Bundle verified iPhone DLC closure into IPA
         shell: bash
         run: |
           set -euo pipefail
-          IPA='Tapped-Out-4.69.5-iPhone16-iOS27-embedded-offline.ipa'
+          python3 tapped-out/offline/inject_offline_server.py \
+            pre-dlc-offline.ipa \
+            build/TSTOOffline.dylib \
+            Tapped-Out-4.69.5-iPhone16-iOS27-FULLY-OFFLINE.ipa \
+            --client-config build/offline-resources/OfflineClientConfig.pb \
+            --gameplay-config build/offline-resources/OfflineGameplayConfig.pb \
+            --dlc-dir build/ios-dlc \
+            --dlc-manifest ios-dlc-manifest.json | tee dlc-bundle-log.txt
+
+      - name: Verify fully offline IPA and complete DLC closure
+        shell: bash
+        run: |
+          set -euo pipefail
+          IPA='Tapped-Out-4.69.5-iPhone16-iOS27-FULLY-OFFLINE.ipa'
           python3 tapped-out/tools/inspect_ipa.py "$IPA" | tee final-verification.txt
           unzip -tq "$IPA"
           rm -rf verify-ipa
@@ -233,26 +292,28 @@ jobs:
           test -s "$APP/OfflineClientConfig.pb"
           test -s "$APP/OfflineGameplayConfig.pb"
           test -s "$APP/OfflinePremiumProfile.json"
-          test -s "$APP/OFFLINE-DLC-IMPORT.txt"
+          test -s "$APP/OfflineDLCManifest.json"
+          test -s "$APP/OfflineDLC/dlc/DLCIndex.zip"
           otool -L "$APP/Tapped Out" | tee otool-main.txt
           grep -F '@executable_path/Frameworks/TSTOOffline.dylib' otool-main.txt
           lipo -archs "$APP/Frameworks/TSTOOffline.dylib" | tee final-dylib-archs.txt
           test "$(cat final-dylib-archs.txt)" = 'arm64'
           python3 - <<'PY'
-          import plistlib
+          import json, plistlib
           from pathlib import Path
           apps=list(Path('verify-ipa/Payload').glob('*.app'))
           assert len(apps)==1
           app=apps[0]
           info=plistlib.loads((app/'Info.plist').read_bytes())
           exe=(app/info['CFBundleExecutable']).read_bytes()
+          manifest=json.loads((app/'OfflineDLCManifest.json').read_text())
           assert info['CFBundleShortVersionString']=='4.69.5'
           assert info['MayhemServerURL']=='http://127.0.0.1:31337'
           assert info['DLCLocation']=='http://127.0.0.1:31337/dlc/'
           assert info['NVOfflineServerEmbedded'] is True
-          assert info['NVOfflineDLCImportDirectory']=='Documents/TSTOOfflineDLC'
-          assert info['UIFileSharingEnabled'] is True
-          assert info['LSSupportsOpeningDocumentsInPlace'] is True
+          assert info['NVOfflineDLCBundled'] is True
+          assert info['NVOfflineDLCBundledFiles'] > 0
+          assert info['NVOfflineDLCBundledBytes'] > 0
           assert b'@executable_path/Frameworks/TSTOOffline.dylib' in exe
           assert exe[0x18190:0x18198] == bytes.fromhex('20008052c0035fd6')
           for dead in (
@@ -264,37 +325,52 @@ jobs:
           ):
               if dead in exe:
                   raise SystemExit(f'external bootstrap route remains: {dead!r}')
+          missing=[]
+          bad=[]
+          dlc=app/'OfflineDLC'
+          for p in manifest['selectedPackages']:
+              f=dlc/p['path']
+              if not f.is_file():
+                  missing.append(p['path'])
+              elif p['file_size'] and f.stat().st_size != p['file_size']:
+                  bad.append((p['path'],f.stat().st_size,p['file_size']))
+          assert not missing, missing[:20]
+          assert not bad, bad[:20]
           dylib=(app/'Frameworks/TSTOOffline.dylib').read_bytes()
-          for required in (
-              b'http://127.0.0.1:31337',
-              b'OFFLINE_TSTO_TOKEN',
-              b'TSTOOfflineDLC',
-              b'Accept-Ranges: bytes',
-              b'/offline/dlc/status',
-          ):
+          for required in (b'http://127.0.0.1:31337',b'OFFLINE_TSTO_TOKEN',b'Accept-Ranges: bytes'):
               assert required in dylib, required
           print('embedded server load-command gate: PASS')
-          print('localhost route gate: PASS')
-          print('Project Springfield dependency gate: PASS')
+          print('localhost-only bootstrap gate: PASS')
           print('disk-space gate: PASS')
-          print('Files DLC import gate: PASS')
-          print('streaming/range DLC server gate: PASS')
+          print('bundled DLC manifest gate: PASS')
+          print('bundled DLC closure completeness gate: PASS')
+          print('selected packages:', manifest['selectedUniquePackages'])
+          print('selected bytes:', manifest['downloadedBytes'])
           PY
           shasum -a 256 "$IPA" | tee final-sha256.txt
+          ls -lh "$IPA" | tee final-size.txt
 
-      - name: Upload embedded-offline IPA and reports
+      - name: Upload fully offline IPA and reports
         uses: actions/upload-artifact@v4
         with:
-          name: Tapped-Out-4.69.5-iPhone16-iOS27-embedded-offline-local-dlc
+          name: Tapped-Out-4.69.5-iPhone16-iOS27-FULLY-OFFLINE
           if-no-files-found: error
           retention-days: 30
+          compression-level: 0
           path: |
-            Tapped-Out-4.69.5-iPhone16-iOS27-embedded-offline.ipa
+            Tapped-Out-4.69.5-iPhone16-iOS27-FULLY-OFFLINE.ipa
             input-sha256.txt
             source-verification.txt
             marker-report.json
             marker-report.txt
             payload-build.txt
+            ios-dlc-corpus-manifest.json
+            ios-dlc-corpus-report.txt
+            ios-dlc-corpus-build.txt
+            ios-dlc-manifest.json
+            ios-dlc-report.txt
+            ios-dlc-build.txt
+            ios-dlc-du.txt
             dlc-server-build.txt
             offline-server-test.log
             dlc-status.json
@@ -305,7 +381,9 @@ jobs:
             injection-log.txt
             prepare-log.txt
             diskfix-log.txt
+            dlc-bundle-log.txt
             final-verification.txt
             otool-main.txt
             final-dylib-archs.txt
             final-sha256.txt
+            final-size.txt
