@@ -1,0 +1,27 @@
+{
+  "profileVersion": 1,
+  "mode": "offline",
+  "profileId": "offline-premium",
+  "displayName": "Offline Premium",
+  "authentication": {
+    "required": false,
+    "anonymous": true,
+    "networkRequired": false
+  },
+  "entitlements": {
+    "forcePremium": true,
+    "premiumEnabled": true,
+    "purchasesRequired": false
+  },
+  "currency": {
+    "money": 2000000000,
+    "premium": 2000000000,
+    "realMoney": 0,
+    "realPremium": 0
+  },
+  "persistence": {
+    "saveLocally": true,
+    "preferLocalOverRemote": true,
+    "remoteSyncEnabled": false
+  }
+}
