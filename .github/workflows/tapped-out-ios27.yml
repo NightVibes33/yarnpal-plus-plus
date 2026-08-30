@@ -1,0 +1,101 @@
+name: Tapped Out iOS 27
+
+on:
+  push:
+    branches:
+      - temp/tapped-out-offline-profile
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout workbench
+        uses: actions/checkout@v4
+
+      - name: Fetch preservation patcher and 4.69.5 IPA
+        run: |
+          git clone --depth 1 https://github.com/bodnjenie14/Tsto_patcher.git upstream-tsto
+          test -f "upstream-tsto/Original Files/tsto_original.ipa"
+          cp "upstream-tsto/Original Files/tsto_original.ipa" input-4.69.5.ipa
+          shasum -a 256 input-4.69.5.ipa | tee input-sha256.txt
+
+      - name: Verify source IPA for iPhone 16 / iOS 27
+        run: |
+          python3 tapped-out/tools/inspect_ipa.py input-4.69.5.ipa | tee source-verification.txt
+
+      - name: Scan 4.69.5 account and currency markers
+        run: |
+          python3 tapped-out/tools/scan_4695_markers.py input-4.69.5.ipa --json marker-report.json | tee marker-report.txt
+
+      - name: Patch client to current Project Springfield preservation endpoints
+        working-directory: upstream-tsto
+        run: |
+          python3 run_cli.py ipa \
+            --profile Beta \
+            --file "Original Files/tsto_original.ipa" \
+            --appname "Tapped Out" \
+            --version 4.69.5
+          test -f Tapped_Out.ipa
+          cp Tapped_Out.ipa ../project-springfield-4.69.5.ipa
+
+      - name: Prepare unsigned iOS 27 IPA
+        run: |
+          python3 tapped-out/ios27/prepare_latest_ipa.py \
+            project-springfield-4.69.5.ipa \
+            Tapped-Out-4.69.5-iPhone16-iOS27-unsigned.ipa | tee prepare-log.txt
+
+      - name: Embed offline premium profile contract
+        run: |
+          python3 - <<'PY'
+          import json, plistlib, tempfile, zipfile
+          from pathlib import Path
+
+          ipa = Path('Tapped-Out-4.69.5-iPhone16-iOS27-unsigned.ipa')
+          profile = Path('tapped-out/profile/offline-profile.json').read_bytes()
+          with tempfile.TemporaryDirectory() as td:
+              root = Path(td)
+              with zipfile.ZipFile(ipa, 'r') as zf:
+                  zf.extractall(root)
+              apps = list((root / 'Payload').glob('*.app'))
+              assert len(apps) == 1, apps
+              app = apps[0]
+              (app / 'OfflinePremiumProfile.json').write_bytes(profile)
+              info_path = app / 'Info.plist'
+              info = plistlib.loads(info_path.read_bytes())
+              info['NVOfflineProfileResource'] = 'OfflinePremiumProfile.json'
+              plistlib.dump(info, info_path.open('wb'), fmt=plistlib.FMT_BINARY, sort_keys=False)
+              out = ipa.with_suffix('.tmp.ipa')
+              with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+                  for p in sorted(root.rglob('*')):
+                      if p.is_file():
+                          zf.write(p, p.relative_to(root).as_posix())
+              out.replace(ipa)
+          PY
+
+      - name: Verify final IPA
+        run: |
+          python3 tapped-out/tools/inspect_ipa.py Tapped-Out-4.69.5-iPhone16-iOS27-unsigned.ipa | tee final-verification.txt
+          unzip -l Tapped-Out-4.69.5-iPhone16-iOS27-unsigned.ipa | grep OfflinePremiumProfile.json
+          shasum -a 256 Tapped-Out-4.69.5-iPhone16-iOS27-unsigned.ipa | tee final-sha256.txt
+
+      - name: Upload IPA and reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tapped-Out-4.69.5-iPhone16-iOS27
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            Tapped-Out-4.69.5-iPhone16-iOS27-unsigned.ipa
+            input-sha256.txt
+            source-verification.txt
+            marker-report.json
+            marker-report.txt
+            prepare-log.txt
+            final-verification.txt
+            final-sha256.txt
