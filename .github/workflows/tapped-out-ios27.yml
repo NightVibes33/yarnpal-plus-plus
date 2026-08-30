@@ -47,15 +47,35 @@ jobs:
           test -s build/offline-resources/OfflineClientConfig.pb
           test -s build/offline-resources/OfflineGameplayConfig.pb
 
-      - name: Host-test embedded server implementation
+      - name: Prepare production local DLC server source
         shell: bash
         run: |
           set -euo pipefail
-          clang -fobjc-arc -fblocks -DTSTO_OFFLINE_STANDALONE \
+          python3 tapped-out/offline/enhance_dlc_server.py \
             tapped-out/offline/OfflineServer.m \
+            build/OfflineServer.full.m | tee dlc-server-build.txt
+          grep -F 'Accept-Ranges: bytes' build/OfflineServer.full.m
+          grep -F 'TSTOOfflineDLC' build/OfflineServer.full.m
+          grep -F '/offline/dlc/status' build/OfflineServer.full.m
+
+      - name: Host-test embedded server and local DLC streaming
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/dlc-fixture/test
+          python3 - <<'PY'
+          from pathlib import Path
+          data=bytes(range(256))*4096
+          Path('build/dlc-fixture/test/asset.bin').write_bytes(data)
+          PY
+
+          clang -fobjc-arc -fblocks -DTSTO_OFFLINE_STANDALONE \
+            build/OfflineServer.full.m \
             -framework Foundation \
             -o build/offline-server-test
-          build/offline-server-test > offline-server-test.log 2>&1 &
+
+          TSTO_OFFLINE_DLC_ROOT="$PWD/build/dlc-fixture" \
+            build/offline-server-test > offline-server-test.log 2>&1 &
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
           for i in {1..20}; do
@@ -64,23 +84,38 @@ jobs:
             fi
             sleep 0.25
           done
+
           python3 - <<'PY'
           import json
           health=json.load(open('health.json'))
           assert health['offline'] is True
           assert health['version'] == '4.69.5'
           PY
+
           curl --fail --silent 'http://127.0.0.1:31337/connect/auth?response_type=code%20lnglv_token&authenticator_login_type=mobile_anonymous' > auth.json
           curl --fail --silent -X POST 'http://127.0.0.1:31337/connect/token?grant_type=authorization_code&code=OFFLINE_TSTO_CODE' > token.json
           curl --fail --silent 'http://127.0.0.1:31337/user/api/ios/getAnonUid' > anon.json
           curl --fail --silent 'http://127.0.0.1:31337/mh/games/lobby/time' > lobby.xml
           curl --fail --silent -X PUT 'http://127.0.0.1:31337/mh/users?applicationUserId=1000001' -o users.pb
           curl --fail --silent 'http://127.0.0.1:31337/mh/games/bg_gameserver_plugin/protocurrency/1000000000001' -o currency.pb
+
+          curl --fail --silent 'http://127.0.0.1:31337/offline/dlc/status' > dlc-status.json
+          curl --fail --silent 'http://127.0.0.1:31337/dlc/test/asset.bin' -o dlc-full.bin
+          cmp build/dlc-fixture/test/asset.bin dlc-full.bin
+          curl --fail --silent --head 'http://127.0.0.1:31337/dlc/test/asset.bin' > dlc-head.txt
+          grep -qi '^Accept-Ranges: bytes' dlc-head.txt
+          grep -qi '^Content-Length: 1048576' dlc-head.txt
+          curl --fail --silent -H 'Range: bytes=100-199' 'http://127.0.0.1:31337/dlc/test/asset.bin' -o dlc-range.bin
+
           python3 - <<'PY'
           import json
+          from pathlib import Path
           auth=json.load(open('auth.json'))
           token=json.load(open('token.json'))
           anon=json.load(open('anon.json'))
+          status=json.load(open('dlc-status.json'))
+          source=Path('build/dlc-fixture/test/asset.bin').read_bytes()
+          ranged=Path('dlc-range.bin').read_bytes()
           assert auth['code'] == 'OFFLINE_TSTO_CODE'
           assert auth['lnglv_token'] == 'OFFLINE_TSTO_TOKEN'
           assert token['access_token'] == 'OFFLINE_TSTO_TOKEN'
@@ -88,7 +123,12 @@ jobs:
           assert open('users.pb','rb').read()
           assert open('currency.pb','rb').read()
           assert b'epochMilliseconds' in open('lobby.xml','rb').read()
+          assert status['files'] >= 1
+          assert status['bytes'] >= len(source)
+          assert ranged == source[100:200]
           print('embedded server host tests: PASS')
+          print('local DLC full-file streaming: PASS')
+          print('local DLC HEAD/range streaming: PASS')
           PY
           kill "$SERVER_PID"
           trap - EXIT
@@ -102,7 +142,7 @@ jobs:
           "$CLANG" -fobjc-arc -fblocks -arch arm64 \
             -isysroot "$SDK" \
             -miphoneos-version-min=13.0 \
-            -dynamiclib tapped-out/offline/OfflineServer.m \
+            -dynamiclib build/OfflineServer.full.m \
             -framework Foundation \
             -Wl,-install_name,@executable_path/Frameworks/TSTOOffline.dylib \
             -o build/TSTOOffline.dylib
@@ -178,7 +218,7 @@ jobs:
               out.replace(ipa)
           PY
 
-      - name: Verify embedded offline IPA
+      - name: Verify embedded offline IPA and DLC import layer
         shell: bash
         run: |
           set -euo pipefail
@@ -193,6 +233,7 @@ jobs:
           test -s "$APP/OfflineClientConfig.pb"
           test -s "$APP/OfflineGameplayConfig.pb"
           test -s "$APP/OfflinePremiumProfile.json"
+          test -s "$APP/OFFLINE-DLC-IMPORT.txt"
           otool -L "$APP/Tapped Out" | tee otool-main.txt
           grep -F '@executable_path/Frameworks/TSTOOffline.dylib' otool-main.txt
           lipo -archs "$APP/Frameworks/TSTOOffline.dylib" | tee final-dylib-archs.txt
@@ -209,6 +250,9 @@ jobs:
           assert info['MayhemServerURL']=='http://127.0.0.1:31337'
           assert info['DLCLocation']=='http://127.0.0.1:31337/dlc/'
           assert info['NVOfflineServerEmbedded'] is True
+          assert info['NVOfflineDLCImportDirectory']=='Documents/TSTOOfflineDLC'
+          assert info['UIFileSharingEnabled'] is True
+          assert info['LSSupportsOpeningDocumentsInPlace'] is True
           assert b'@executable_path/Frameworks/TSTOOffline.dylib' in exe
           assert exe[0x18190:0x18198] == bytes.fromhex('20008052c0035fd6')
           for dead in (
@@ -221,19 +265,27 @@ jobs:
               if dead in exe:
                   raise SystemExit(f'external bootstrap route remains: {dead!r}')
           dylib=(app/'Frameworks/TSTOOffline.dylib').read_bytes()
-          assert b'http://127.0.0.1:31337' in dylib
-          assert b'OFFLINE_TSTO_TOKEN' in dylib
+          for required in (
+              b'http://127.0.0.1:31337',
+              b'OFFLINE_TSTO_TOKEN',
+              b'TSTOOfflineDLC',
+              b'Accept-Ranges: bytes',
+              b'/offline/dlc/status',
+          ):
+              assert required in dylib, required
           print('embedded server load-command gate: PASS')
           print('localhost route gate: PASS')
           print('Project Springfield dependency gate: PASS')
           print('disk-space gate: PASS')
+          print('Files DLC import gate: PASS')
+          print('streaming/range DLC server gate: PASS')
           PY
           shasum -a 256 "$IPA" | tee final-sha256.txt
 
       - name: Upload embedded-offline IPA and reports
         uses: actions/upload-artifact@v4
         with:
-          name: Tapped-Out-4.69.5-iPhone16-iOS27-embedded-offline-server
+          name: Tapped-Out-4.69.5-iPhone16-iOS27-embedded-offline-local-dlc
           if-no-files-found: error
           retention-days: 30
           path: |
@@ -243,7 +295,10 @@ jobs:
             marker-report.json
             marker-report.txt
             payload-build.txt
+            dlc-server-build.txt
             offline-server-test.log
+            dlc-status.json
+            dlc-head.txt
             offline-dylib-file.txt
             offline-dylib-archs.txt
             localhost-patch.txt
