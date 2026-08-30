@@ -1,27 +1,42 @@
 {
-  "profileVersion": 1,
+  "profileVersion": 2,
+  "target": {
+    "product": "The Simpsons: Tapped Out",
+    "version": "4.69.5",
+    "platform": "iOS",
+    "device": "iPhone 16",
+    "os": "iOS 27",
+    "architecture": "arm64"
+  },
   "mode": "offline",
-  "profileId": "offline-premium",
+  "profileId": "offline-premium-4695",
   "displayName": "Offline Premium",
   "authentication": {
     "required": false,
     "anonymous": true,
-    "networkRequired": false
+    "networkRequired": false,
+    "preferCachedUser": true,
+    "remoteAccountLookupEnabled": false
   },
   "entitlements": {
     "forcePremium": true,
     "premiumEnabled": true,
-    "purchasesRequired": false
+    "purchasesRequired": false,
+    "storeKitRequired": false
   },
   "currency": {
     "money": 2000000000,
     "premium": 2000000000,
+    "donuts": 2000000000,
     "realMoney": 0,
-    "realPremium": 0
+    "realPremium": 0,
+    "spendPremiumLocally": true,
+    "allowOfflineAwards": true
   },
   "persistence": {
     "saveLocally": true,
     "preferLocalOverRemote": true,
-    "remoteSyncEnabled": false
+    "remoteSyncEnabled": false,
+    "cachedUserEnabled": true
   }
 }
