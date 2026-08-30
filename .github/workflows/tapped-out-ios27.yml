@@ -23,24 +23,16 @@ jobs:
         run: |
           set -euo pipefail
           curl --fail --location --retry 3 https://teamtsto.org/ -o teamtsto.html
-          python3 - <<'PY'
-          import html, re
-          text = html.unescape(open('teamtsto.html', encoding='utf-8', errors='ignore').read())
-          text = text.replace('\\/', '/').replace('\\u002F', '/').replace('\\u003A', ':')
-          urls = sorted(set(re.findall(r'https?://[^"\'<>\\s]+', text)))
-          print('=== Project Springfield URL candidates ===')
-          for u in urls:
-              if any(k in u.lower() for k in ('.ipa', 'pjtsto', 'springfield', 'tsto.live', 'cdn')):
-                  print(u[:500])
-          PY
           echo '=== endpoint probes ==='
           for u in 'https://test.pjtsto.com/' 'https://cdn.projectspringfield.com/static/'; do
             code=$(curl -L -sS -o /dev/null -w '%{http_code}' --connect-timeout 10 --max-time 20 "$u" || true)
             echo "$u -> HTTP $code"
+            test "$code" != "000"
           done
 
       - name: Fetch preservation patcher and 4.69.5 IPA
         run: |
+          set -euo pipefail
           git clone --depth 1 https://github.com/bodnjenie14/Tsto_patcher.git upstream-tsto
           test -f "upstream-tsto/Original Files/tsto_original.ipa"
           cp "upstream-tsto/Original Files/tsto_original.ipa" input-4.69.5.ipa
@@ -75,7 +67,6 @@ jobs:
           sys.modules["tkinter"] = tkinter
 
           from modules.ios import run_ipa_script
-
           run_ipa_script(
               "Original Files/tsto_original.ipa",
               "https://test.pjtsto.com/",
@@ -87,11 +78,20 @@ jobs:
               print,
           )
           PY
-          test -f Tapped_Out.ipa
+          test -s Tapped_Out.ipa
           cp Tapped_Out.ipa ../project-springfield-4.69.5.ipa
+
+      - name: Fix dead EA authentication routes
+        run: |
+          set -euo pipefail
+          python3 tapped-out/tools/patch_project_springfield_auth.py \
+            project-springfield-4.69.5.ipa \
+            project-springfield-4.69.5-authfixed.ipa | tee authfix-log.txt
+          mv project-springfield-4.69.5-authfixed.ipa project-springfield-4.69.5.ipa
 
       - name: Prepare unsigned iOS 27 IPA
         run: |
+          set -euo pipefail
           python3 tapped-out/ios27/prepare_latest_ipa.py \
             project-springfield-4.69.5.ipa \
             Tapped-Out-4.69.5-iPhone16-iOS27-unsigned.ipa | tee prepare-log.txt
@@ -106,6 +106,7 @@ jobs:
 
       - name: Embed offline premium profile contract
         run: |
+          set -euo pipefail
           python3 - <<'PY'
           import plistlib, tempfile, zipfile
           from pathlib import Path
@@ -132,7 +133,7 @@ jobs:
               out.replace(ipa)
           PY
 
-      - name: Verify final IPA and disk fix
+      - name: Verify final IPA, auth routes and disk fix
         run: |
           set -euo pipefail
           python3 tapped-out/tools/inspect_ipa.py Tapped-Out-4.69.5-iPhone16-iOS27-unsigned.ipa | tee final-verification.txt
@@ -151,13 +152,22 @@ jobs:
           print('disk fix bytes:', got.hex())
           if got != expected:
               raise SystemExit('disk-space patch verification failed')
+          for dead in (b'https://auth.tnt-ea.com', b'https://nucleus.tnt-ea.com'):
+              if dead in blob:
+                  raise SystemExit(f'dead auth route remains: {dead!r}')
+          replacement=b'https://test.pjtsto.com'
+          count=blob.count(replacement)
+          print('Project Springfield auth/server host occurrences:', count)
+          if count < 3:
+              raise SystemExit(f'expected at least 3 Project Springfield host occurrences, found {count}')
+          print('dead EA auth route gate: PASS')
           PY
           shasum -a 256 Tapped-Out-4.69.5-iPhone16-iOS27-unsigned.ipa | tee final-sha256.txt
 
       - name: Upload IPA and reports
         uses: actions/upload-artifact@v4
         with:
-          name: Tapped-Out-4.69.5-iPhone16-iOS27-fixed
+          name: Tapped-Out-4.69.5-iPhone16-iOS27-server-disk-fixed
           if-no-files-found: error
           retention-days: 30
           path: |
@@ -166,8 +176,8 @@ jobs:
             source-verification.txt
             marker-report.json
             marker-report.txt
+            authfix-log.txt
             prepare-log.txt
             diskfix-log.txt
             final-verification.txt
             final-sha256.txt
-            teamtsto.html
