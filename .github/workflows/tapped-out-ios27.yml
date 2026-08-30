@@ -18,6 +18,27 @@ jobs:
       - name: Checkout workbench
         uses: actions/checkout@v4
 
+      - name: Probe current Project Springfield distribution
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 https://teamtsto.org/ -o teamtsto.html
+          python3 - <<'PY'
+          import html, re
+          text = html.unescape(open('teamtsto.html', encoding='utf-8', errors='ignore').read())
+          text = text.replace('\\/', '/').replace('\\u002F', '/').replace('\\u003A', ':')
+          urls = sorted(set(re.findall(r'https?://[^"\'<>\\s]+', text)))
+          print('=== Project Springfield URL candidates ===')
+          for u in urls:
+              if any(k in u.lower() for k in ('.ipa', 'pjtsto', 'springfield', 'tsto.live', 'cdn')):
+                  print(u[:500])
+          PY
+          echo '=== endpoint probes ==='
+          for u in 'https://test.pjtsto.com/' 'https://cdn.projectspringfield.com/static/'; do
+            code=$(curl -L -sS -o /dev/null -w '%{http_code}' --connect-timeout 10 --max-time 20 "$u" || true)
+            echo "$u -> HTTP $code"
+          done
+
       - name: Fetch preservation patcher and 4.69.5 IPA
         run: |
           git clone --depth 1 https://github.com/bodnjenie14/Tsto_patcher.git upstream-tsto
@@ -33,7 +54,7 @@ jobs:
         run: |
           python3 tapped-out/tools/scan_4695_markers.py input-4.69.5.ipa --json marker-report.json | tee marker-report.txt
 
-      - name: Patch client to current Project Springfield preservation endpoints
+      - name: Patch client to Project Springfield endpoints
         working-directory: upstream-tsto
         run: |
           python3 - <<'PY'
@@ -75,6 +96,14 @@ jobs:
             project-springfield-4.69.5.ipa \
             Tapped-Out-4.69.5-iPhone16-iOS27-unsigned.ipa | tee prepare-log.txt
 
+      - name: Fix legacy iOS disk-space guard
+        run: |
+          set -euo pipefail
+          python3 tapped-out/tools/patch_ios27_diskcheck.py \
+            Tapped-Out-4.69.5-iPhone16-iOS27-unsigned.ipa \
+            Tapped-Out-4.69.5-iPhone16-iOS27-diskfix.ipa | tee diskfix-log.txt
+          mv Tapped-Out-4.69.5-iPhone16-iOS27-diskfix.ipa Tapped-Out-4.69.5-iPhone16-iOS27-unsigned.ipa
+
       - name: Embed offline premium profile contract
         run: |
           python3 - <<'PY'
@@ -103,16 +132,32 @@ jobs:
               out.replace(ipa)
           PY
 
-      - name: Verify final IPA
+      - name: Verify final IPA and disk fix
         run: |
+          set -euo pipefail
           python3 tapped-out/tools/inspect_ipa.py Tapped-Out-4.69.5-iPhone16-iOS27-unsigned.ipa | tee final-verification.txt
+          unzip -tq Tapped-Out-4.69.5-iPhone16-iOS27-unsigned.ipa
           unzip -l Tapped-Out-4.69.5-iPhone16-iOS27-unsigned.ipa | grep OfflinePremiumProfile.json
+          python3 - <<'PY'
+          import plistlib, zipfile
+          ipa='Tapped-Out-4.69.5-iPhone16-iOS27-unsigned.ipa'
+          with zipfile.ZipFile(ipa) as z:
+              info_name=[n for n in z.namelist() if n.startswith('Payload/') and n.count('/') == 2 and n.endswith('.app/Info.plist')][0]
+              info=plistlib.loads(z.read(info_name))
+              exe=info_name.rsplit('/',1)[0]+'/'+info['CFBundleExecutable']
+              blob=z.read(exe)
+          got=blob[0x18190:0x18198]
+          expected=bytes.fromhex('20008052c0035fd6')
+          print('disk fix bytes:', got.hex())
+          if got != expected:
+              raise SystemExit('disk-space patch verification failed')
+          PY
           shasum -a 256 Tapped-Out-4.69.5-iPhone16-iOS27-unsigned.ipa | tee final-sha256.txt
 
       - name: Upload IPA and reports
         uses: actions/upload-artifact@v4
         with:
-          name: Tapped-Out-4.69.5-iPhone16-iOS27
+          name: Tapped-Out-4.69.5-iPhone16-iOS27-fixed
           if-no-files-found: error
           retention-days: 30
           path: |
@@ -122,5 +167,7 @@ jobs:
             marker-report.json
             marker-report.txt
             prepare-log.txt
+            diskfix-log.txt
             final-verification.txt
             final-sha256.txt
+            teamtsto.html
