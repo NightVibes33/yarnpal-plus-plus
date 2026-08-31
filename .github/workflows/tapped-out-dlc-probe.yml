@@ -1,0 +1,169 @@
+name: Tapped Out 4.69.5 DLC Closure Probe
+
+on:
+  push:
+    branches:
+      - temp/tapped-out-offline-profile
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Probe exact iPhone DLC package closure
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import concurrent.futures
+          import io
+          import urllib.error
+          import urllib.request
+          import xml.etree.ElementTree as ET
+          import zipfile
+          from collections import Counter
+
+          BASE = 'https://cdn.projectspringfield.com/static/'
+          LANGUAGES = {'all', 'en'}
+          TIERS = {'all', '100', 'retina', 'iphone', 'caf', 'wav'}
+          PREFIX = 'dlc/DLCIndex-v4_69_'
+          WORKERS = 32
+
+          def request(url, *, range_probe=False, timeout=25):
+              headers = {
+                  'User-Agent': 'TSTO-iOS27-preservation-probe/1.0',
+                  'Accept': '*/*',
+                  'Accept-Encoding': 'identity',
+              }
+              if range_probe:
+                  headers['Range'] = 'bytes=0-0'
+              req = urllib.request.Request(url, headers=headers)
+              return urllib.request.urlopen(req, timeout=timeout)
+
+          def fetch_bytes(url):
+              last = None
+              for attempt in range(3):
+                  try:
+                      with request(url, timeout=45) as response:
+                          return response.read()
+                  except Exception as exc:
+                      last = exc
+              raise RuntimeError(f'fetch failed: {last}')
+
+          def unzip_first(data):
+              with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                  names = [n for n in zf.namelist() if not n.endswith('/')]
+                  if not names:
+                      raise RuntimeError('ZIP contains no files')
+                  return zf.read(names[0])
+
+          def child_value(package, name, attr):
+              node = package.find(name)
+              return '' if node is None else node.get(attr, '')
+
+          master_xml = unzip_first(fetch_bytes(BASE + 'dlc/DLCIndex.zip'))
+          master = ET.fromstring(master_xml)
+          indexes = []
+          for node in master.findall('./IndexFile'):
+              raw = node.get('index') or ''
+              rel = raw.replace(':', '/')
+              if rel.startswith(PREFIX) and rel not in indexes:
+                  indexes.append(rel)
+          if not indexes:
+              raise SystemExit('No current v4_69 index found')
+
+          packages = {}
+          for rel in indexes:
+              xml = unzip_first(fetch_bytes(BASE + rel))
+              root = ET.fromstring(xml)
+              for package in root.iter('Package'):
+                  tier = (package.get('tier') or '').strip().lower()
+                  language = child_value(package, 'Language', 'val').strip().lower()
+                  if not language:
+                      language = child_value(package, 'Language', 'name').strip().lower()
+                  if tier not in TIERS or language not in LANGUAGES:
+                      continue
+                  file_name = child_value(package, 'FileName', 'val').strip()
+                  if not file_name:
+                      continue
+                  path = file_name.replace(':', '/')
+                  try:
+                      advertised = int(child_value(package, 'FileSize', 'val') or 0)
+                  except ValueError:
+                      advertised = 0
+                  url = BASE + path
+                  old = packages.get(url)
+                  if old and old['size'] and advertised and old['size'] != advertised:
+                      raise SystemExit(f'Conflicting advertised sizes for {path}: {old["size"]} vs {advertised}')
+                  packages.setdefault(url, {
+                      'url': url,
+                      'path': path,
+                      'tier': tier,
+                      'language': language,
+                      'size': advertised,
+                  })
+
+          selected = list(packages.values())
+          print(f'current indexes: {len(indexes)}')
+          print(f'selected unique packages: {len(selected)}')
+          print(f'selected advertised bytes: {sum(p["size"] for p in selected)}')
+          print('selected by tier:', dict(sorted(Counter(p['tier'] for p in selected).items())))
+          print('selected by language:', dict(sorted(Counter(p['language'] for p in selected).items())))
+
+          def probe(pkg):
+              last = None
+              for attempt in range(2):
+                  try:
+                      with request(pkg['url'], range_probe=True, timeout=25) as response:
+                          status = getattr(response, 'status', 200)
+                          content_range = response.headers.get('Content-Range', '')
+                          content_length = response.headers.get('Content-Length', '')
+                          remote_size = None
+                          if '/' in content_range:
+                              tail = content_range.rsplit('/', 1)[1].strip()
+                              if tail.isdigit():
+                                  remote_size = int(tail)
+                          elif status == 200 and content_length.isdigit():
+                              remote_size = int(content_length)
+                          if status not in (200, 206):
+                              return pkg, f'HTTP {status}', remote_size
+                          if pkg['size'] and remote_size is not None and remote_size != pkg['size']:
+                              return pkg, f'size mismatch remote={remote_size} advertised={pkg["size"]}', remote_size
+                          return pkg, None, remote_size
+                  except urllib.error.HTTPError as exc:
+                      last = f'HTTP {exc.code}'
+                  except Exception as exc:
+                      last = f'{type(exc).__name__}: {exc}'
+              return pkg, last or 'unknown probe failure', None
+
+          failures = []
+          completed = 0
+          with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as pool:
+              futures = [pool.submit(probe, pkg) for pkg in selected]
+              for future in concurrent.futures.as_completed(futures):
+                  pkg, error, remote_size = future.result()
+                  completed += 1
+                  if error:
+                      failures.append((pkg, error, remote_size))
+                      msg = (f'{pkg["path"]} | tier={pkg["tier"]} | language={pkg["language"]} | '
+                             f'advertised={pkg["size"]} | error={error}')
+                      print(f'::error title=DLC probe failure::{msg}')
+                  if completed % 100 == 0 or completed == len(selected):
+                      print(f'probed {completed}/{len(selected)}; failures={len(failures)}')
+
+          by_tier = Counter(pkg['tier'] for pkg, _, _ in failures)
+          by_language = Counter(pkg['language'] for pkg, _, _ in failures)
+          print('failure count:', len(failures))
+          print('failures by tier:', dict(sorted(by_tier.items())))
+          print('failures by language:', dict(sorted(by_language.items())))
+          for pkg, error, remote_size in sorted(failures, key=lambda item: item[0]['path']):
+              print(f'FAIL {pkg["path"]} tier={pkg["tier"]} lang={pkg["language"]} advertised={pkg["size"]} remote={remote_size} error={error}')
+
+          if failures:
+              raise SystemExit(f'DLC closure probe failed: {len(failures)} inaccessible/mismatched packages')
+          print('DLC closure probe: PASS')
+          PY
