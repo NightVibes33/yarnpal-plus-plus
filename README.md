@@ -1,18 +1,17 @@
-# Blurrr 2.3.56 Offline Premium Temp Build
+# Blurrr 2.3.56 Offline Premium + 999999 Juice Temp Build
 
 ## Target
 
 **Application:** Blurrr  
 **Bundle ID:** `com.pinguo.msgAries`  
 **Version:** `2.3.56`  
+**Build:** `2356`  
 **Platform:** iOS / arm64  
 **Branch:** `temp/offline-premium-profile-20260902`
 
-This branch contains the version-locked patch and GitHub Actions workflow for producing an unsigned Blurrr 2.3.56 IPA with a hardcoded local premium profile.
+This branch contains the version-locked Blurrr patch and GitHub Actions workflow for producing an unsigned IPA with a hardcoded local premium profile plus a fixed Blurrr Juice balance of `999999`.
 
-## Offline premium state
-
-The patch forces the relevant client-side entitlement paths into a paid state:
+## Forced premium state
 
 ```text
 MSUserDefaultHelper.isVip()                   -> true
@@ -30,34 +29,41 @@ PSAutoSubscribeModel.giftVip()                -> true
 PSAutoSubscribeModel.operationVip()           -> true
 ```
 
-Boolean return gates are replaced directly in the ARM64 executable with:
+## Forced Blurrr Juice
 
-```asm
-mov w0, #1
-ret
-```
-
-for enabled premium state, and:
-
-```asm
-mov w0, #0
-ret
-```
-
-for trial-state checks that must remain disabled.
-
-## Source verification
-
-The patch is intentionally locked to the tested Blurrr IPA:
+Static Objective-C metadata in Blurrr 2.3.56 identifies the two signed 64-bit Juice getters used by the account/defaults model:
 
 ```text
-Bundle:  com.pinguo.msgAries
-Version: 2.3.56
-Input SHA-256:
+MSUserDefaultHelper.juiceFromServer()   IMP 0x10065c81c -> 999999
+MSUserDefaultHelper.balanceJuice()      IMP 0x10065cdbc -> 999999
+```
+
+Both getters are patched so normal account/server refreshes cannot reduce the locally observed Juice balance.
+
+The ARM64 return sequence loads decimal `999999` (`0x0F423F`) into `x0` and returns:
+
+```asm
+movz x0, #0x423f
+movk x0, #0x000f, lsl #16
+ret
+```
+
+## Verification
+
+Reference user-supplied IPA SHA-256:
+
+```text
 968a5b3dba2c70773ffe3f552740207cf23248141f790b2cb216bf1588e1869b
 ```
 
-The workflow refuses to patch a source IPA when its SHA-256, bundle identifier, or app version does not match the expected Blurrr 2.3.56 build.
+The workflow validates:
+
+- bundle ID `com.pinguo.msgAries`
+- version `2.3.56`
+- build `2356`
+- exact expected ARM64 instruction windows for every premium and Juice patch
+- post-write bytes for every patch location
+- IPA ZIP integrity after repackaging
 
 ## Branch contents
 
@@ -68,52 +74,16 @@ blurrr-offline-premium/OfflinePremiumProfile.json
 blurrr-offline-premium/README.md
 ```
 
-### `patch.py`
+## GitHub Release
 
-Contains the exact version-locked ARM64 offsets and entitlement-return replacements.
-
-### `OfflinePremiumProfile.json`
-
-Documents the intended local state:
-
-```json
-{
-  "mode": "offline-premium-hardcoded",
-  "vip": true,
-  "svipFeatureGate": true,
-  "subscriptionValid": true,
-  "trial": false,
-  "appleVip": true,
-  "operationVip": true,
-  "giftVip": true,
-  "expirationPolicy": "ignored-by-patched-validity-gate"
-}
-```
-
-## GitHub Release workflow
-
-Every push to this temp branch triggers:
-
-```text
-.github/workflows/publish-blurrr-temp-release.yml
-```
-
-The workflow:
-
-1. Checks out `temp/offline-premium-profile-20260902`.
-2. Obtains the Blurrr 2.3.56 source IPA.
-3. Verifies the exact SHA-256, bundle ID, and version.
-4. Extracts the IPA.
-5. Applies the offline VIP/SVIP patch.
-6. Removes stale code-signature data from the modified bundle.
-7. Repackages the app as:
+Every push to this temp branch triggers the release workflow. It downloads the known Blurrr 2.3.56 source asset, verifies the app identity, applies the premium + `999999` Juice patches, removes stale signature material, repackages the app, and publishes:
 
 ```text
 BlurrrPremium-2.3.56-unsigned.ipa
+BlurrrPremium-2.3.56-unsigned.sha256
 ```
 
-8. Verifies ZIP integrity and generates a SHA-256 file.
-9. Publishes both files to the GitHub Release tag:
+Release tag:
 
 ```text
 blurrr-offline-premium-2.3.56-temp
@@ -121,12 +91,4 @@ blurrr-offline-premium-2.3.56-temp
 
 ## Signing
 
-The generated IPA is intentionally unsigned. Modifying the Mach-O executable invalidates the original Apple code signature.
-
-Sign `BlurrrPremium-2.3.56-unsigned.ipa` with the intended iOS signing certificate before installing it on a device.
-
-## Expected result
-
-The patched executable locally reports a valid paid VIP/SVIP state without relying on the normal trial flag or local subscription-validity result.
-
-Server-authorized functionality can still independently require backend authorization; the patch specifically targets the client-side premium state present in this Blurrr build.
+The generated IPA is intentionally unsigned because Mach-O modification invalidates the original Apple code signature. Re-sign the IPA with the intended iOS signing certificate before installation.
