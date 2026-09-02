@@ -1,0 +1,11 @@
+{
+  "mode": "offline-premium-hardcoded",
+  "vip": true,
+  "svipFeatureGate": true,
+  "subscriptionValid": true,
+  "trial": false,
+  "appleVip": true,
+  "operationVip": true,
+  "giftVip": true,
+  "expirationPolicy": "ignored-by-patched-validity-gate"
+}
