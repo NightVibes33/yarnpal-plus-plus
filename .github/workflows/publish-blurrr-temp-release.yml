@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   publish:
-    name: Build and publish Blurrr offline premium IPA
+    name: Build and publish Blurrr Premium + 999999 Juice IPA
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -95,7 +95,7 @@ jobs:
           echo '=== Objective-C metadata around Juice ==='
           grep -in -B 15 -A 30 -E 'balanceJuice|juice' /tmp/blurrr-objc.txt | head -n 800 || true
 
-      - name: Apply and verify hardcoded offline premium profile
+      - name: Apply and verify Premium + 999999 Juice patch
         run: |
           set -euo pipefail
           echo "Patching $EXECUTABLE"
@@ -118,5 +118,5 @@ jobs:
             BlurrrPremium-2.3.56-unsigned.ipa \
             BlurrrPremium-2.3.56-unsigned.sha256 \
             --target "${GITHUB_SHA}" \
-            --title "Blurrr 2.3.56 Offline Premium (Temp)" \
-            --notes "Unsigned Blurrr 2.3.56 temp test build from temp/offline-premium-profile-20260902. Pro entitlement gates are hardcoded locally. Juice metadata inspection is included in CI while the 999999 balance patch is being mapped. Sign before installation."
+            --title "Blurrr 2.3.56 Premium + 999999 Juice (Temp)" \
+            --notes "Unsigned Blurrr 2.3.56 temp build from temp/offline-premium-profile-20260902. Premium/SVIP runtime gates are hardcoded locally and both juiceFromServer() and balanceJuice() return 999999. Sign before installation."
