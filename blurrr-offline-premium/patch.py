@@ -7,8 +7,16 @@ REFERENCE_IPA_SHA256 = "968a5b3dba2c70773ffe3f552740207cf23248141f790b2cb216bf15
 TRUE = bytes.fromhex("20008052c0035fd6")   # mov w0,#1 ; ret
 FALSE = bytes.fromhex("00008052c0035fd6")  # mov w0,#0 ; ret
 
-# Expected instruction windows were read directly from the user-supplied
-# Blurrr 2.3.56 / build 2356 arm64 executable before patching.
+# 999999 (0x0F423F) returned as signed 64-bit value in x0:
+#   movz x0, #0x423f
+#   movk x0, #0x000f, lsl #16
+#   ret
+JUICE_999999 = bytes.fromhex("e04788d2e001a0f2c0035fd6")
+
+# Expected instruction windows were read directly from Blurrr 2.3.56 / 2356.
+# IMPORTANT: the Juice patch deliberately does NOT modify
+# MSUserDefaultHelper.balanceJuice / juiceFromServer. Those values participate
+# in account/server synchronization and caused remote templates to stop loading.
 PATCHES = [
     ("MSUserDefaultHelper.isVip",              0x661A84, bytes.fromhex("f44fbea9fd7b01a9"), TRUE),
     ("MSUserDefaultHelper.monthlySVIPIsOpen",  0x665390, bytes.fromhex("f44fbea9fd7b01a9"), TRUE),
@@ -21,6 +29,11 @@ PATCHES = [
     ("PSAutoSubscribeModel.appleVip",          0x367C46C, bytes.fromhex("00244039c0035fd6"), TRUE),
     ("PSAutoSubscribeModel.giftVip",           0x367C47C, bytes.fromhex("00284039c0035fd6"), TRUE),
     ("PSAutoSubscribeModel.operationVip",      0x367C48C, bytes.fromhex("002c4039c0035fd6"), TRUE),
+
+    # Local spend UI balance routine used by ExpendJuiceView before confirming
+    # a Juice-consuming action. Forcing THIS internal balance source avoids
+    # poisoning the account/server balance fields used by template APIs.
+    ("ExpendJuiceView.localSpendableBalance",  0xC03BD4, bytes.fromhex("fa67bba9f85f01a9f65702a9"), JUICE_999999),
 ]
 
 
@@ -57,7 +70,6 @@ def patch_binary(binary: Path) -> None:
 
     binary.write_bytes(data)
 
-    # Re-read every patch location after writing.
     verify = binary.read_bytes()
     for name, offset, _expected, replacement in PATCHES:
         actual = verify[offset:offset + len(replacement)]
@@ -69,7 +81,7 @@ def patch_binary(binary: Path) -> None:
         print(f"verified {name}: {offset:#x} = {actual.hex()}")
 
     print(f"Executable SHA-256 after patch: {sha256(binary)}")
-    print(f"Verified {len(PATCHES)} entitlement gates")
+    print(f"Verified {len(PATCHES)} runtime gates (premium + local spendable Juice=999999)")
 
 
 if __name__ == "__main__":
