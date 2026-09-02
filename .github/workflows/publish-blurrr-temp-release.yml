@@ -166,6 +166,17 @@ jobs:
 
           echo "Patching $EXECUTABLE"
           file "$EXECUTABLE"
+
+          echo '=== Juice selector/string scan ==='
+          strings -a -t x "$EXECUTABLE" | grep -i -E 'juice|balanceJuice|blurrr.?juice' | head -n 250 || true
+          OBJDUMP="$(command -v llvm-objdump || command -v llvm-objdump-20 || command -v llvm-objdump-19 || command -v llvm-objdump-18 || command -v llvm-objdump-17 || true)"
+          echo "llvm-objdump: ${OBJDUMP:-not-found}"
+          if [ -n "$OBJDUMP" ]; then
+            "$OBJDUMP" --macho --objc-meta-data "$EXECUTABLE" > /tmp/blurrr-objc.txt 2>&1 || true
+            echo '=== Objective-C metadata around Juice ==='
+            grep -in -B 12 -A 20 -E 'balanceJuice|juice' /tmp/blurrr-objc.txt | head -n 500 || true
+          fi
+
           python blurrr-offline-premium/patch.py "$EXECUTABLE"
 
           find work/Payload -type d -name _CodeSignature -prune -exec rm -rf {} +
@@ -188,4 +199,4 @@ jobs:
             BlurrrPremium-2.3.56-unsigned.sha256 \
             --target "${GITHUB_SHA}" \
             --title "Blurrr 2.3.56 Offline Premium (Temp)" \
-            --notes "Unsigned Blurrr 2.3.56 temp test build from temp/offline-premium-profile-20260902. The workflow validates bundle/version/build and all 11 entitlement instruction windows before publishing. Sign before installation."
+            --notes "Unsigned Blurrr 2.3.56 temp test build from temp/offline-premium-profile-20260902. The workflow validates bundle/version/build and all entitlement instruction windows before publishing. Sign before installation."
