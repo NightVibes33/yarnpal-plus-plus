@@ -1,36 +1,40 @@
-name: Publish Blurrr temp release
+name: Publish Blurrr 2.3.56 temp release
 
 on:
   push:
     branches:
       - temp/offline-premium-profile-20260902
-    paths:
-      - '.github/workflows/publish-blurrr-temp-release.yml'
-      - 'blurrr-offline-premium/**'
 
 permissions:
   contents: write
 
+concurrency:
+  group: blurrr-offline-premium-2.3.56-temp
+  cancel-in-progress: true
+
 jobs:
   publish:
+    name: Build and publish Blurrr offline premium IPA
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
+
     steps:
       - name: Checkout temp branch
         uses: actions/checkout@v4
+        with:
+          ref: temp/offline-premium-profile-20260902
 
-      - name: Install browser tooling
+      - name: Install download tooling
         run: |
           python -m pip install --upgrade pip
           pip install playwright requests
           python -m playwright install --with-deps chromium
 
-      - name: Download Blurrr 2.3.56 source IPA
+      - name: Download exact Blurrr 2.3.56 source IPA
         run: |
           cat > /tmp/get_ipa.py <<'PY'
           import re
           from pathlib import Path
-          from urllib.parse import urljoin
           from playwright.sync_api import sync_playwright
 
           URL = 'https://ipauniverse.com/com.pinguo.msgAries'
@@ -43,139 +47,116 @@ jobs:
               captured = []
 
               def on_response(resp):
-                  u = resp.url
-                  ct = (resp.headers.get('content-type') or '').lower()
-                  cd = (resp.headers.get('content-disposition') or '').lower()
-                  if '.ipa' in u.lower() or 'application/octet-stream' in ct or '.ipa' in cd:
-                      captured.append(u)
+                  url = resp.url
+                  content_type = (resp.headers.get('content-type') or '').lower()
+                  disposition = (resp.headers.get('content-disposition') or '').lower()
+                  if '.ipa' in url.lower() or 'application/octet-stream' in content_type or '.ipa' in disposition:
+                      captured.append(url)
 
               page.on('response', on_response)
               page.goto(URL, wait_until='domcontentloaded', timeout=120000)
               page.wait_for_timeout(8000)
 
-              hrefs = page.locator('a').evaluate_all("els => els.map(a => ({href:a.href,text:(a.innerText||a.textContent||'').trim()}))")
+              links = page.locator('a').evaluate_all(
+                  "els => els.map(a => ({href:a.href,text:(a.innerText||a.textContent||'').trim()}))"
+              )
               candidates = []
-              for item in hrefs:
+              for item in links:
                   href = item.get('href') or ''
                   text = item.get('text') or ''
                   if '.ipa' in href.lower() or 'download' in href.lower() or re.search(r'download|ipa', text, re.I):
-                      candidates.append((href, text))
+                      candidates.append(href)
 
-              print('Candidate links:')
-              for c in candidates:
-                  print(c)
-
-              # First try explicit IPA/direct download links.
-              for href, text in candidates:
-                  if not href:
-                      continue
-                  if href.startswith('javascript:'):
+              for href in candidates + captured:
+                  if not href or href.startswith('javascript:'):
                       continue
                   try:
-                      with context.expect_page(timeout=3000) as _:
-                          pass
-                  except Exception:
-                      pass
-                  try:
-                      r = context.request.get(href, timeout=120000, max_redirects=10)
-                      body = r.body()
+                      response = context.request.get(href, timeout=120000, max_redirects=10)
+                      body = response.body()
                       if len(body) > 50_000_000 and body[:2] == b'PK':
                           OUT.write_bytes(body)
-                          print('Downloaded direct candidate:', href, len(body))
+                          print('Downloaded:', href, len(body))
                           browser.close()
                           raise SystemExit(0)
                   except SystemExit:
                       raise
-                  except Exception as e:
-                      print('Direct candidate failed:', href, e)
+                  except Exception as exc:
+                      print('Candidate failed:', href, exc)
 
-              # Then click download-looking elements and capture a browser download.
               selectors = [
                   "a:has-text('Download')",
                   "button:has-text('Download')",
                   "text=/Download IPA/i",
                   "text=/Download/i",
               ]
-              for sel in selectors:
-                  loc = page.locator(sel)
-                  for i in range(min(loc.count(), 10)):
+              for selector in selectors:
+                  locator = page.locator(selector)
+                  for index in range(min(locator.count(), 10)):
                       try:
                           with page.expect_download(timeout=30000) as info:
-                              loc.nth(i).click(timeout=10000)
-                          dl = info.value
-                          dl.save_as(str(OUT))
+                              locator.nth(index).click(timeout=10000)
+                          download = info.value
+                          download.save_as(str(OUT))
                           if OUT.exists() and OUT.stat().st_size > 50_000_000:
-                              print('Downloaded through browser:', dl.suggested_filename, OUT.stat().st_size)
+                              print('Downloaded through browser:', download.suggested_filename, OUT.stat().st_size)
                               browser.close()
                               raise SystemExit(0)
                       except SystemExit:
                           raise
-                      except Exception as e:
-                          print('Click candidate failed:', sel, i, e)
+                      except Exception as exc:
+                          print('Click failed:', selector, index, exc)
 
-              # Last chance: request any captured binary URL.
-              for href in captured:
-                  try:
-                      r = context.request.get(href, timeout=120000, max_redirects=10)
-                      body = r.body()
-                      if len(body) > 50_000_000 and body[:2] == b'PK':
-                          OUT.write_bytes(body)
-                          print('Downloaded captured response:', href, len(body))
-                          browser.close()
-                          raise SystemExit(0)
-                  except SystemExit:
-                      raise
-                  except Exception as e:
-                      print('Captured URL failed:', href, e)
-
-              page.screenshot(path='ipauniverse-debug.png', full_page=True)
-              Path('ipauniverse-debug.html').write_text(page.content(), encoding='utf-8')
               browser.close()
-              raise SystemExit('Could not resolve IPA download from IPAUniverse')
+              raise SystemExit('Could not resolve the Blurrr source IPA download')
           PY
           python /tmp/get_ipa.py
 
-      - name: Verify source and patch offline premium gates
+      - name: Verify Blurrr source IPA
         run: |
-          set -euo pipefail
-          sha256sum Blurrr-2.3.56-source.ipa
           python - <<'PY'
-          import hashlib, plistlib, zipfile, sys
+          import hashlib
+          import plistlib
+          import zipfile
           from pathlib import Path
 
           ipa = Path('Blurrr-2.3.56-source.ipa')
-          expected = '968a5b3dba2c70773ffe3f552740207cf23248141f790b2cb216bf1588e1869b'
-          got = hashlib.sha256(ipa.read_bytes()).hexdigest()
-          print('source sha256:', got)
-          if got != expected:
-              raise SystemExit(f'Input IPA hash mismatch: expected {expected}, got {got}')
+          expected_sha = '968a5b3dba2c70773ffe3f552740207cf23248141f790b2cb216bf1588e1869b'
+          actual_sha = hashlib.sha256(ipa.read_bytes()).hexdigest()
+          print('Source SHA-256:', actual_sha)
+          if actual_sha != expected_sha:
+              raise SystemExit(f'Input IPA hash mismatch: expected {expected_sha}, got {actual_sha}')
 
-          with zipfile.ZipFile(ipa) as z:
-              plist_name = next(n for n in z.namelist() if n.startswith('Payload/') and n.endswith('.app/Info.plist'))
-              info = plistlib.loads(z.read(plist_name))
-              print('bundle:', info.get('CFBundleIdentifier'))
-              print('version:', info.get('CFBundleShortVersionString'))
-              print('build:', info.get('CFBundleVersion'))
-              if info.get('CFBundleIdentifier') != 'com.pinguo.msgAries':
-                  raise SystemExit('Unexpected bundle id')
-              if info.get('CFBundleShortVersionString') != '2.3.56':
-                  raise SystemExit('Unexpected app version')
+          with zipfile.ZipFile(ipa) as archive:
+              plist_path = next(
+                  name for name in archive.namelist()
+                  if name.startswith('Payload/') and name.endswith('.app/Info.plist')
+              )
+              info = plistlib.loads(archive.read(plist_path))
+              assert info.get('CFBundleIdentifier') == 'com.pinguo.msgAries'
+              assert info.get('CFBundleShortVersionString') == '2.3.56'
+              print('Verified:', info.get('CFBundleIdentifier'), info.get('CFBundleShortVersionString'), info.get('CFBundleVersion'))
           PY
 
+      - name: Apply hardcoded offline premium profile
+        run: |
+          set -euo pipefail
           rm -rf work
           mkdir work
           unzip -q Blurrr-2.3.56-source.ipa -d work
 
           EXECUTABLE=$(python - <<'PY'
-          import glob, plistlib
+          import glob
+          import plistlib
           from pathlib import Path
+
           app = Path(glob.glob('work/Payload/*.app')[0])
-          with open(app/'Info.plist','rb') as f:
-              info = plistlib.load(f)
+          with open(app / 'Info.plist', 'rb') as stream:
+              info = plistlib.load(stream)
           print(app / info['CFBundleExecutable'])
           PY
           )
-          echo "Executable: $EXECUTABLE"
+
+          echo "Patching $EXECUTABLE"
           python blurrr-offline-premium/patch.py "$EXECUTABLE"
 
           find work/Payload -type d -name _CodeSignature -prune -exec rm -rf {} +
@@ -185,7 +166,7 @@ jobs:
           unzip -tq BlurrrPremium-2.3.56-unsigned.ipa
           sha256sum BlurrrPremium-2.3.56-unsigned.ipa | tee BlurrrPremium-2.3.56-unsigned.sha256
 
-      - name: Publish temp GitHub Release
+      - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: blurrr-offline-premium-2.3.56-temp
@@ -197,4 +178,4 @@ jobs:
             BlurrrPremium-2.3.56-unsigned.sha256 \
             --target "${GITHUB_SHA}" \
             --title "Blurrr 2.3.56 Offline Premium (Temp)" \
-            --notes "Unsigned temp test build from temp/offline-premium-profile-20260902. Sign before installation."
+            --notes "Unsigned Blurrr 2.3.56 temp test build from temp/offline-premium-profile-20260902. Sign before installation."
