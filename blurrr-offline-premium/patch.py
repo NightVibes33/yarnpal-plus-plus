@@ -7,6 +7,12 @@ REFERENCE_IPA_SHA256 = "968a5b3dba2c70773ffe3f552740207cf23248141f790b2cb216bf15
 TRUE = bytes.fromhex("20008052c0035fd6")   # mov w0,#1 ; ret
 FALSE = bytes.fromhex("00008052c0035fd6")  # mov w0,#0 ; ret
 
+# 999999 (0x0F423F) returned as a signed 64-bit integer in x0:
+#   movz x0, #0x423f
+#   movk x0, #0x000f, lsl #16
+#   ret
+JUICE_999999 = bytes.fromhex("e04788d2e001a0f2c0035fd6")
+
 # Expected instruction windows were read directly from the user-supplied
 # Blurrr 2.3.56 / build 2356 arm64 executable before patching.
 PATCHES = [
@@ -21,6 +27,11 @@ PATCHES = [
     ("PSAutoSubscribeModel.appleVip",          0x367C46C, bytes.fromhex("00244039c0035fd6"), TRUE),
     ("PSAutoSubscribeModel.giftVip",           0x367C47C, bytes.fromhex("00284039c0035fd6"), TRUE),
     ("PSAutoSubscribeModel.operationVip",      0x367C48C, bytes.fromhex("002c4039c0035fd6"), TRUE),
+    # Juice balance is exposed through two signed 64-bit getters on the same
+    # account/defaults model. Patch both so normal server refreshes cannot
+    # reduce the locally observed balance.
+    ("MSUserDefaultHelper.juiceFromServer",     0x65C81C, bytes.fromhex("228c8c52820ca0720360fcd2"), JUICE_999999),
+    ("MSUserDefaultHelper.balanceJuice",        0x65CDBC, bytes.fromhex("422c8cd2822dacf2c26dccf2"), JUICE_999999),
 ]
 
 
@@ -69,7 +80,7 @@ def patch_binary(binary: Path) -> None:
         print(f"verified {name}: {offset:#x} = {actual.hex()}")
 
     print(f"Executable SHA-256 after patch: {sha256(binary)}")
-    print(f"Verified {len(PATCHES)} entitlement gates")
+    print(f"Verified {len(PATCHES)} runtime gates (premium + 999999 Juice)")
 
 
 if __name__ == "__main__":
