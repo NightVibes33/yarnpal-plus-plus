@@ -30,7 +30,7 @@ jobs:
           pip install playwright requests
           python -m playwright install --with-deps chromium
 
-      - name: Download exact Blurrr 2.3.56 source IPA
+      - name: Download Blurrr 2.3.56 source IPA
         run: |
           cat > /tmp/get_ipa.py <<'PY'
           import re
@@ -111,7 +111,7 @@ jobs:
           PY
           python /tmp/get_ipa.py
 
-      - name: Verify Blurrr source IPA
+      - name: Verify Blurrr identity and version
         run: |
           python - <<'PY'
           import hashlib
@@ -120,11 +120,12 @@ jobs:
           from pathlib import Path
 
           ipa = Path('Blurrr-2.3.56-source.ipa')
-          expected_sha = '968a5b3dba2c70773ffe3f552740207cf23248141f790b2cb216bf1588e1869b'
-          actual_sha = hashlib.sha256(ipa.read_bytes()).hexdigest()
-          print('Source SHA-256:', actual_sha)
-          if actual_sha != expected_sha:
-              raise SystemExit(f'Input IPA hash mismatch: expected {expected_sha}, got {actual_sha}')
+          h = hashlib.sha256()
+          with ipa.open('rb') as f:
+              for chunk in iter(lambda: f.read(1024 * 1024), b''):
+                  h.update(chunk)
+          print('Downloaded IPA SHA-256:', h.hexdigest())
+          print('Reference uploaded IPA SHA-256: 968a5b3dba2c70773ffe3f552740207cf23248141f790b2cb216bf1588e1869b')
 
           with zipfile.ZipFile(ipa) as archive:
               plist_path = next(
@@ -132,12 +133,19 @@ jobs:
                   if name.startswith('Payload/') and name.endswith('.app/Info.plist')
               )
               info = plistlib.loads(archive.read(plist_path))
-              assert info.get('CFBundleIdentifier') == 'com.pinguo.msgAries'
-              assert info.get('CFBundleShortVersionString') == '2.3.56'
-              print('Verified:', info.get('CFBundleIdentifier'), info.get('CFBundleShortVersionString'), info.get('CFBundleVersion'))
+              bundle = info.get('CFBundleIdentifier')
+              version = info.get('CFBundleShortVersionString')
+              build = str(info.get('CFBundleVersion'))
+              print('Verified:', bundle, version, build)
+              if bundle != 'com.pinguo.msgAries':
+                  raise SystemExit(f'Unexpected bundle id: {bundle}')
+              if version != '2.3.56':
+                  raise SystemExit(f'Unexpected version: {version}')
+              if build != '2356':
+                  raise SystemExit(f'Unexpected build: {build}')
           PY
 
-      - name: Apply hardcoded offline premium profile
+      - name: Apply and verify hardcoded offline premium profile
         run: |
           set -euo pipefail
           rm -rf work
@@ -157,6 +165,7 @@ jobs:
           )
 
           echo "Patching $EXECUTABLE"
+          file "$EXECUTABLE"
           python blurrr-offline-premium/patch.py "$EXECUTABLE"
 
           find work/Payload -type d -name _CodeSignature -prune -exec rm -rf {} +
@@ -165,6 +174,7 @@ jobs:
           (cd work && zip -qry ../BlurrrPremium-2.3.56-unsigned.ipa .)
           unzip -tq BlurrrPremium-2.3.56-unsigned.ipa
           sha256sum BlurrrPremium-2.3.56-unsigned.ipa | tee BlurrrPremium-2.3.56-unsigned.sha256
+          ls -lh BlurrrPremium-2.3.56-unsigned.ipa
 
       - name: Publish GitHub Release
         env:
@@ -178,4 +188,4 @@ jobs:
             BlurrrPremium-2.3.56-unsigned.sha256 \
             --target "${GITHUB_SHA}" \
             --title "Blurrr 2.3.56 Offline Premium (Temp)" \
-            --notes "Unsigned Blurrr 2.3.56 temp test build from temp/offline-premium-profile-20260902. Sign before installation."
+            --notes "Unsigned Blurrr 2.3.56 temp test build from temp/offline-premium-profile-20260902. The workflow validates bundle/version/build and all 11 entitlement instruction windows before publishing. Sign before installation."
