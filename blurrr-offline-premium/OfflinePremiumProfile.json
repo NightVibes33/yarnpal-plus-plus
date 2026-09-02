@@ -7,5 +7,8 @@
   "appleVip": true,
   "operationVip": true,
   "giftVip": true,
+  "juice": 999999,
+  "juiceFromServer": 999999,
+  "balanceJuice": 999999,
   "expirationPolicy": "ignored-by-patched-validity-gate"
 }
