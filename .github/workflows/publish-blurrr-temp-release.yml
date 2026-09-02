@@ -67,7 +67,7 @@ jobs:
                   raise SystemExit(f'Unexpected build: {build}')
           PY
 
-      - name: Unpack and inspect Juice metadata
+      - name: Unpack Blurrr
         run: |
           set -euo pipefail
           rm -rf work
@@ -84,16 +84,6 @@ jobs:
           )
           echo "EXECUTABLE=$EXECUTABLE" >> "$GITHUB_ENV"
           file "$EXECUTABLE"
-          echo '=== Juice strings/selectors ==='
-          strings -a -t x "$EXECUTABLE" | grep -i -E 'juice|balanceJuice|blurrr.?juice' | head -n 400 || true
-          if ! command -v llvm-objdump >/dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq llvm >/dev/null
-          fi
-          echo "llvm-objdump=$(command -v llvm-objdump)"
-          llvm-objdump --macho --objc-meta-data "$EXECUTABLE" > /tmp/blurrr-objc.txt 2>&1 || true
-          echo '=== Objective-C metadata around Juice ==='
-          grep -in -B 15 -A 30 -E 'balanceJuice|juice' /tmp/blurrr-objc.txt | head -n 800 || true
 
       - name: Apply and verify Premium + 999999 Juice patch
         run: |
