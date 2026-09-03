@@ -1,0 +1,83 @@
+name: Deep analyze BlurrrMusicVideoEditorPatch dylib
+
+on:
+  push:
+    branches:
+      - temp/blurrr-dylib-analysis-20260902
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch dylib
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 --retry-delay 2 \
+            'https://github.com/apptesters-org/AppTesters_Repo/releases/download/23-04-2026/Blurrr_2.3.56_Premium_%40thisismanpreets_apptesters.org.ipa' \
+            -o source.ipa
+          echo 'daeaf19e85746e3b3cbe6357c1399dfe0210a929783b2f8906d2104df5163335  source.ipa' | sha256sum -c -
+          unzip -q source.ipa -d work
+          cp "$(find work -type f -name 'BlurrrMusicVideoEditorPatch.dylib' -print -quit)" ./patch.dylib
+
+      - name: Dump Objective-C metadata strings and constructors
+        run: |
+          python -m pip install --quiet lief capstone
+          python - <<'PY'
+          import lief, struct
+          from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
+          b=lief.parse('patch.dylib')
+          print('=== OBJC CLASS NAMES ===')
+          for secname in ('__objc_classname','__objc_methname','__cstring'):
+              sec=next((s for s in b.sections if s.name==secname),None)
+              print(f'\n--- {secname} ---')
+              if not sec: continue
+              vals=[]
+              for p in bytes(sec.content).split(b'\0'):
+                  if len(p) < 2: continue
+                  try: t=p.decode('utf-8')
+                  except: continue
+                  if all((ord(c)>=32 or c in '\t\r\n') for c in t): vals.append(t)
+              for t in vals: print(t)
+          print('\n=== MOD_INIT POINTERS ===')
+          sec=next((s for s in b.sections if s.name=='__mod_init_func'),None)
+          if sec:
+              raw=bytes(sec.content)
+              ptrs=[struct.unpack_from('<Q',raw,i)[0] for i in range(0,len(raw),8)]
+              for x in ptrs: print(hex(x))
+              md=Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+              blob=open('patch.dylib','rb').read()
+              for addr in ptrs:
+                  print(f'\n--- ctor {addr:#x} ---')
+                  try: off=b.virtual_address_to_offset(addr)
+                  except Exception as e:
+                      print('offset error',e); continue
+                  code=blob[off:off+0x300]
+                  for i,ins in enumerate(md.disasm(code,addr)):
+                      print(f'{ins.address:#x}: {ins.mnemonic} {ins.op_str}')
+                      if i>=120: break
+          PY
+
+      - name: Focused behavior strings
+        run: |
+          strings -a -n 3 patch.dylib > /tmp/s.txt
+          echo '=== URLs / DOMAINS ==='
+          grep -Eai 'https?://|[A-Za-z0-9.-]+\.(com|net|org|io|cn|co|app)(/|$)' /tmp/s.txt | sort -u | head -1000 || true
+          echo '=== VIP / LICENSE / NETWORK / TOKEN METHODS ==='
+          grep -Eai 'vip|svip|premium|license|entitle|subscribe|subscription|receipt|purchase|trial|token|session|request|response|remote|config|telemetry|audit|refund|billing|dunning|watermark|drm|server|user|account|login|keychain|security|jailbreak|debugger|pirate|hook|fishhook|substrate|ellekit' /tmp/s.txt | sort -u | head -3000 || true
+
+      - name: LLVM Objective-C metadata if supported
+        run: |
+          set +e
+          OBJDUMP=$(command -v llvm-objdump || command -v llvm-objdump-18 || command -v llvm-objdump-17 || true)
+          echo "objdump=$OBJDUMP"
+          if [ -n "$OBJDUMP" ]; then
+            "$OBJDUMP" --macho --private-headers patch.dylib | head -1000
+            echo '=== OBJC META ==='
+            "$OBJDUMP" --macho --objc-meta-data patch.dylib | head -5000
+          fi
+          exit 0
