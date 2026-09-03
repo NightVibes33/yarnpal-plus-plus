@@ -1,0 +1,87 @@
+name: Audit Blurrr template network hooks
+
+on:
+  push:
+    branches:
+      - temp/blurrr-dylib-analysis-20260902
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch exact dylib source
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 --retry-delay 2 \
+            'https://github.com/apptesters-org/AppTesters_Repo/releases/download/23-04-2026/Blurrr_2.3.56_Premium_%40thisismanpreets_apptesters.org.ipa' \
+            -o source.ipa
+          echo 'daeaf19e85746e3b3cbe6357c1399dfe0210a929783b2f8906d2104df5163335  source.ipa' | sha256sum -c -
+          unzip -q source.ipa -d work
+          cp "$(find work -type f -name 'BlurrrMusicVideoEditorPatch.dylib' -print -quit)" patch.dylib
+          cp "$(find work/Payload -maxdepth 2 -type f -name Aries -print -quit)" Aries
+
+      - name: Audit hook and request surfaces
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet lief
+          python - <<'PY'
+          import lief,re
+          p='patch.dylib'
+          b=lief.parse(p)
+          strings=[]
+          for sec in b.sections:
+              if sec.name not in ('__cstring','__objc_methname','__objc_classname'): continue
+              for raw in bytes(sec.content).split(b'\0'):
+                  if len(raw)<2: continue
+                  try: s=raw.decode('utf-8')
+                  except: continue
+                  strings.append(s)
+          S=set(strings)
+          print('=== DIRECT BLURRR CLASS / SELECTOR REFERENCES IN DYLIB ===')
+          targets=['MSRequestEncoder','PromoteTemplateDao','PreinstallDBManager','PreinstallSheetViewModel','ClassifiedListViewModel','MSDomainDNSCache','HostRecordCache','ConnectManager','MSUserDefaultHelper','PSAutoSubscribeModel','MSCheckIAPReceiptModel','SVIPContentView','MSVipLevel','VipPrivilegeGenerator','SVIPEquityModel','Aries']
+          for t in targets:
+              hits=sorted(x for x in S if t.lower() in x.lower())
+              print(t, '=>', hits[:50])
+
+          print('\n=== IMPORTED HOOK / NETWORK SYMBOLS ===')
+          keys=('method_setimplementation','method_exchangeimplementations','class_replacemethod','class_addmethod','class_getinstancemethod','class_getclassmethod','objc_getclass','objc_lookUpClass'.lower(),'dlsym','dlopen','rebind_symbols','mshook','substrate','ellekit','dobby','urlsession','nsurlconnection','cfhttp','nw_connection','nw_endpoint','secitem','sectrust')
+          for s in sorted({x.name for x in b.imported_symbols if x.name}):
+              if any(k in s.lower() for k in keys): print(s)
+
+          print('\n=== NETWORK / HEADER / SESSION SELECTORS IN DYLIB ===')
+          pats=('request','response','urlsession','datatask','downloadtask','uploadtask','http','header','token','session','cookie','cache','endpoint','remote','refresh','renew','telemetry','license','entitlement','certificate','challenge')
+          for s in sorted(S):
+              if any(k in s.lower() for k in pats): print(s)
+
+          print('\n=== REQUEST ENCODING FIELD NAMES PRESENT IN DYLIB ===')
+          for t in ['UserID','UserToken','Sign','Time','AppID','AppVersion','EID','FA','FV','LL','Channel','InitStamp','UpgradeStamp','Density','ScreenSize','ENCH','ENCB']:
+              print(t, 'YES' if t in S else 'no')
+          PY
+
+      - name: Audit Blurrr template endpoint and local fallback strings
+        run: |
+          set -euo pipefail
+          strings -a -n 4 Aries > /tmp/aries.strings
+          echo '=== LIVE CONTENT ENDPOINTS ==='
+          grep -E '/app/v1/tou_tiao_template/|/ugc/v1/content|/v1/preset/search|/v1/cloud-project/search|/v1/material-favorite|/v1/operational-positions|/v1/multi-json-config-show' /tmp/aries.strings | sort -u || true
+          echo '=== TEMPLATE/CACHE/FALLBACK METHODS ==='
+          grep -Eai 'PromoteTemplateDao|PreinstallDBManager|PreinstallSheetViewModel|kolPresetCache|normalCustomData|qrCodeData|moveOldPreInstall|getNextKolPresetDetail|getNormalCustomData|getQRCodeData|ClassifiedList getMateriales error|ClassifiedList getCategories error|requestDataAndRefreshUI|networkAnomalyView|network retry|backupRefresh|resetIPCache|cleanDomainCache|HostRecordCache|MSDomainDNSCache' /tmp/aries.strings | sort -u | head -1000 || true
+          echo '=== REQUEST ENCODER FIELDS ==='
+          grep -E '^UserID$|^UserToken$|^Sign$|^Time$|^AppID$|^AppVersion$|^EID$|^FA$|^FV$|^LL$|^Channel$|^InitStamp$|^UpgradeStamp$|^Density$|^ScreenSize$|^ENCH$|^ENCB$' /tmp/aries.strings | sort -u || true
+
+      - name: Focus suspicious dylib network methods
+        run: |
+          set -euo pipefail
+          llvm-objdump-18 --macho --objc-meta-data patch.dylib > /tmp/objc.txt || true
+          strings -a -n 3 patch.dylib > /tmp/dylib.strings
+          echo '=== SUSPICIOUS CLASSES/METHODS ==='
+          grep -Eai 'VIPWebhookPuller|FeatureFlagStore|SessionBroker|TokenBroker|LicenseBroker|EntitlementResolver|TelemetryClient|canonicalEndpoint|refreshFromRemote|renewIfNeeded|mintSessionToken|rotateRefreshToken|NSURLSession|NSMutableURLRequest|setValue:forHTTPHeaderField:|addValue:forHTTPHeaderField:|dataTaskWithRequest|sendSynchronousRequest|resume' /tmp/objc.txt /tmp/dylib.strings | head -2500 || true
+          echo '=== URL / HOST MATERIAL ==='
+          grep -Eaio 'https?://[^[:space:]"<>]+' /tmp/dylib.strings | sort -u | head -500 || true
+          grep -Eai 'host|domain|endpoint|baseURL|canonicalEndpoint|remote' /tmp/dylib.strings | sort -u | head -1000 || true
