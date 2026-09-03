@@ -1,0 +1,98 @@
+name: Trace Blurrr network popup
+
+on:
+  push:
+    branches:
+      - temp/blurrr-dylib-analysis-20260902
+
+permissions:
+  contents: read
+
+jobs:
+  trace:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download exact dylib source IPA
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 --retry-delay 2 \
+            'https://github.com/apptesters-org/AppTesters_Repo/releases/download/23-04-2026/Blurrr_2.3.56_Premium_%40thisismanpreets_apptesters.org.ipa' \
+            -o source.ipa
+          echo 'daeaf19e85746e3b3cbe6357c1399dfe0210a929783b2f8906d2104df5163335  source.ipa' | sha256sum -c -
+          rm -rf work && mkdir work
+          unzip -q source.ipa -d work
+          APP=$(find work/Payload -maxdepth 1 -type d -name '*.app' -print -quit)
+          DYLIB=$(find "$APP" -type f -name 'BlurrrMusicVideoEditorPatch.dylib' -print -quit)
+          echo "APP=$APP" >> "$GITHUB_ENV"
+          echo "DYLIB=$DYLIB" >> "$GITHUB_ENV"
+
+      - name: Search exact popup across bundle
+        run: |
+          set +e
+          echo '=== TEXT FILE HITS ==='
+          grep -RIna --binary-files=without-match -E 'Oh! The network is unstable|network is unstable|Please check and try later' "$APP" | head -500
+          echo '=== BINARY STRING HITS ==='
+          find "$APP" -type f -print0 | while IFS= read -r -d '' f; do
+            if strings -a "$f" 2>/dev/null | grep -Fq 'network is unstable'; then
+              echo "FILE=$f"
+              strings -a -t x "$f" | grep -Ei 'Oh! The network is unstable|network is unstable|Please check and try later' | head -50
+            fi
+          done
+          echo '=== DYLIB NETWORK / ALERT RELATED STRINGS ==='
+          strings -a -t x "$DYLIB" | grep -Eai 'network|unstable|try later|toast|alert|HUD|MBProgress|SVProgress|error|failure|offline|reachability|AFNetwork|URLSession|NSMutableURLRequest|License|Entitlement|Token|remote|config' | head -3000
+          exit 0
+
+      - name: Locate exact strings and Mach-O sections
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet lief capstone
+          python - <<'PY'
+          import os, pathlib, lief
+          needles=[b'Oh! The network is unstable. Please check and try later',b'The network is unstable',b'network is unstable',b'Please check and try later']
+          files=[pathlib.Path(os.environ['APP'])/'Aries', pathlib.Path(os.environ['DYLIB'])]
+          for p in files:
+              data=p.read_bytes()
+              print('\n===',p,'===')
+              b=lief.parse(str(p))
+              for n in needles:
+                  start=0
+                  while True:
+                      off=data.find(n,start)
+                      if off<0: break
+                      print('needle',n,'fileoff',hex(off))
+                      sec=None
+                      for s in b.sections:
+                          try:
+                              so=s.offset; sz=s.size
+                          except: continue
+                          if so <= off < so+sz:
+                              sec=s; break
+                      if sec:
+                          va=sec.virtual_address+(off-sec.offset)
+                          print(' section',sec.name,'va',hex(va),'sec_off',hex(sec.offset),'sec_va',hex(sec.virtual_address))
+                      start=off+1
+          PY
+
+      - name: Search app resources for error keys and localization
+        run: |
+          set +e
+          python - <<'PY'
+          import os, pathlib, re
+          root=pathlib.Path(os.environ['APP'])
+          pats=[re.compile(x,re.I) for x in ['network is unstable','try later','network.*unstable','unstable.*network']]
+          for p in root.rglob('*'):
+              if not p.is_file() or p.stat().st_size>20_000_000: continue
+              try: d=p.read_bytes()
+              except: continue
+              for enc in ('utf-8','utf-16','utf-16le','utf-16be'):
+                  try: t=d.decode(enc)
+                  except: continue
+                  if any(r.search(t) for r in pats):
+                      print('RESOURCE_HIT',p,'encoding',enc)
+                      for line in t.splitlines():
+                          if any(r.search(line) for r in pats): print(line[:1000])
+                      break
+          PY
+          exit 0
