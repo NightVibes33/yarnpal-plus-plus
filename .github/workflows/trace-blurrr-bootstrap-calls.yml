@@ -1,0 +1,171 @@
+name: Trace Blurrr dylib bootstrap calls
+
+on:
+  push:
+    branches:
+      - temp/blurrr-dylib-analysis-20260902
+
+permissions:
+  contents: read
+
+jobs:
+  trace:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch exact dylib
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 --retry-delay 2 \
+            'https://github.com/apptesters-org/AppTesters_Repo/releases/download/23-04-2026/Blurrr_2.3.56_Premium_%40thisismanpreets_apptesters.org.ipa' \
+            -o source.ipa
+          echo 'daeaf19e85746e3b3cbe6357c1399dfe0210a929783b2f8906d2104df5163335  source.ipa' | sha256sum -c -
+          unzip -q source.ipa -d work
+          cp "$(find work -type f -name 'BlurrrMusicVideoEditorPatch.dylib' -print -quit)" patch.dylib
+
+      - name: Build annotated bootstrap call graph
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet lief capstone
+          llvm-objdump-18 --macho --objc-meta-data patch.dylib > /tmp/objc.txt || true
+          llvm-nm-18 -nm patch.dylib > /tmp/nm.txt || true
+          python - <<'PY'
+          import re, struct, subprocess
+          import lief
+          from capstone import *
+          from capstone.arm64 import *
+
+          path='patch.dylib'
+          data=open(path,'rb').read()
+          b=lief.parse(path)
+
+          # Parse ObjC selector-reference pointers.
+          def section(name):
+              return next((s for s in b.sections if s.name==name),None)
+          meth=section('__objc_methname')
+          selrefs=section('__objc_selrefs')
+          classrefs=section('__objc_classrefs')
+          classnames=section('__objc_classname')
+
+          def cstr_at_va(va):
+              for s in b.sections:
+                  if s.virtual_address <= va < s.virtual_address+s.size and s.offset:
+                      off=s.offset+(va-s.virtual_address)
+                      end=data.find(b'\0',off)
+                      if end<0: end=min(len(data),off+512)
+                      try: return data[off:end].decode('utf-8','replace')
+                      except: return None
+              return None
+
+          selmap={}
+          if selrefs:
+              raw=bytes(selrefs.content)
+              for i in range(0,len(raw)-7,8):
+                  ptr=struct.unpack_from('<Q',raw,i)[0]
+                  name=cstr_at_va(ptr)
+                  if name: selmap[selrefs.virtual_address+i]=name
+
+          # Parse method names / IMPs from llvm objc metadata.
+          method_imp={}
+          last_name=None
+          for line in open('/tmp/objc.txt',errors='ignore'):
+              m=re.search(r'\bname\s+0x[0-9a-fA-F]+\s+(.+?)\s*$',line)
+              if m:
+                  last_name=m.group(1).strip()
+                  continue
+              m=re.search(r'\bimp\s+0x([0-9a-fA-F]+)',line)
+              if m and last_name:
+                  method_imp[int(m.group(1),16)]=last_name
+                  last_name=None
+
+          # Parse symbols.
+          sym={}
+          for line in open('/tmp/nm.txt',errors='ignore'):
+              m=re.search(r'\b([0-9a-fA-F]{4,16})\b.*\s(_?[^\s]+)$',line.strip())
+              if m:
+                  try: sym[int(m.group(1),16)]=m.group(2)
+                  except: pass
+
+          labels={**sym,**method_imp}
+          known={
+              0x7a264:'_PPBootstrap +load',
+              0x115cc8:'_DABootstrap +load',
+              0x199904:'_FDBootstrap +load',
+              0x111f88:'PopupValidator +validateForBundle:',
+              0x112cec:'PopupValidator +canonicalEndpoint',
+              0x165ed4:'LicenseBroker +brokerForBundle:',
+              0x16c0d8:'EntitlementResolver +resolveForUser:',
+              0x16ed50:'TokenBroker +mintSessionTokenForBundle:expiry:',
+              0x16fa44:'TokenBroker +redeemToken:',
+              0x1724f0:'PolicyEngine +defaultEngine',
+              0x174c88:'TelemetryClient +emitEvent:properties:',
+              0x174fc8:'TelemetryClient +flushBatch',
+              0x178bb0:'SessionBroker +brokerForDeviceID:',
+              0x17abe8:'SessionBroker -renewIfNeeded',
+              0x18f0ec:'FeatureFlagStore +defaultStore',
+              0x1925c0:'FeatureFlagStore -refreshFromRemote:',
+              0x195fe4:'CrashDispatcher +shared',
+          }
+          labels.update(known)
+
+          md=Cs(CS_ARCH_ARM64,CS_MODE_ARM)
+          md.detail=True
+
+          # Track ADRP pages so loads/adds into selrefs can be annotated.
+          def dump(start,span=0x1800):
+              try: off=b.virtual_address_to_offset(start)
+              except Exception as e:
+                  print('OFFSET ERROR',hex(start),e); return
+              print('\n\n########',labels.get(start,hex(start)),'@',hex(start),'########')
+              regs={}
+              insns=list(md.disasm(data[off:off+span],start))
+              for ins in insns:
+                  comments=[]
+                  # adrp reg, #page
+                  if ins.mnemonic=='adrp' and len(ins.operands)>=2 and ins.operands[0].type==ARM64_OP_REG and ins.operands[1].type==ARM64_OP_IMM:
+                      regs[ins.reg_name(ins.operands[0].reg)]=ins.operands[1].imm
+                  elif ins.mnemonic=='adr' and len(ins.operands)>=2 and ins.operands[0].type==ARM64_OP_REG and ins.operands[1].type==ARM64_OP_IMM:
+                      regs[ins.reg_name(ins.operands[0].reg)]=ins.operands[1].imm
+                  elif ins.mnemonic=='add' and len(ins.operands)>=3 and ins.operands[0].type==ARM64_OP_REG and ins.operands[1].type==ARM64_OP_REG and ins.operands[2].type==ARM64_OP_IMM:
+                      dst=ins.reg_name(ins.operands[0].reg); src=ins.reg_name(ins.operands[1].reg)
+                      if src in regs:
+                          addr=regs[src]+ins.operands[2].imm
+                          regs[dst]=addr
+                          if addr in selmap: comments.append('SELREF='+selmap[addr])
+                  elif ins.mnemonic.startswith('ldr') and len(ins.operands)>=2 and ins.operands[0].type==ARM64_OP_REG and ins.operands[1].type==ARM64_OP_MEM:
+                      dst=ins.reg_name(ins.operands[0].reg); mem=ins.operands[1].mem; base=ins.reg_name(mem.base)
+                      if base in regs:
+                          addr=regs[base]+mem.disp
+                          if addr in selmap:
+                              comments.append('SEL='+selmap[addr])
+                              regs.pop(dst,None)
+                          else:
+                              regs[dst]=addr
+                  # direct calls / branches
+                  if ins.mnemonic in ('bl','b') and ins.operands and ins.operands[0].type==ARM64_OP_IMM:
+                      tgt=ins.operands[0].imm
+                      nm=labels.get(tgt)
+                      if nm: comments.append('TARGET='+nm)
+                      elif tgt in known: comments.append('TARGET='+known[tgt])
+                  # stop at a RET once enough body was covered; but don't stop on first tiny anti-obfuscation return branch if far into data.
+                  print(f'{ins.address:#010x}: {ins.mnemonic:8s} {ins.op_str:35s}' + ((' ; '+' | '.join(comments)) if comments else ''))
+                  if ins.mnemonic=='ret' and ins.address>start+0x40:
+                      break
+
+          for a in (0x7a264,0x115cc8,0x199904,0x111f88,0x112cec,0x1925c0,0x17abe8):
+              dump(a)
+
+          print('\n=== DIRECT BL EDGES FROM BOOTSTRAPS (larger scan) ===')
+          for start in (0x7a264,0x115cc8,0x199904):
+              off=b.virtual_address_to_offset(start)
+              edges=[]
+              for ins in md.disasm(data[off:off+0x5000],start):
+                  if ins.mnemonic=='bl' and ins.operands and ins.operands[0].type==ARM64_OP_IMM:
+                      tgt=ins.operands[0].imm
+                      edges.append((ins.address,tgt,labels.get(tgt,'')))
+                  if ins.mnemonic=='ret' and ins.address>start+0x40: break
+              print('\n',labels.get(start,hex(start)))
+              for src,tgt,nm in edges: print(hex(src),'->',hex(tgt),nm)
+          PY
