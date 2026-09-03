@@ -1,0 +1,52 @@
+name: Audit Blurrr dylib runtime targets
+
+on:
+  push:
+    branches:
+      - temp/blurrr-dylib-analysis-20260902
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch exact dylib
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 --retry-delay 2 'https://github.com/apptesters-org/AppTesters_Repo/releases/download/23-04-2026/Blurrr_2.3.56_Premium_%40thisismanpreets_apptesters.org.ipa' -o source.ipa
+          echo 'daeaf19e85746e3b3cbe6357c1399dfe0210a929783b2f8906d2104df5163335  source.ipa' | sha256sum -c -
+          unzip -q source.ipa -d work
+          cp "$(find work -type f -name 'BlurrrMusicVideoEditorPatch.dylib' -print -quit)" patch.dylib
+      - name: Runtime import and bind audit
+        run: |
+          set -euo pipefail
+          echo '=== OBJC / DYLD / MEMORY RUNTIME IMPORTS ==='
+          llvm-nm-18 -u patch.dylib | grep -Eai 'objc|class_|method_|imp_|sel_|protocol_|dlopen|dlsym|dyld|mprotect|vm_|mach_|sysctl|ptrace|SecItem|NSUserDefaults|Keychain|URL|Request|Session' | sort -u || true
+          echo '=== MACH-O BINDS FOR RUNTIME IMPORTS ==='
+          llvm-objdump-18 --macho --bind patch.dylib | grep -Eai 'objc|class_|method_|imp_|sel_|dlopen|dlsym|NSURL|NSMutableURLRequest|NSUserDefaults|SecItem' | head -2000 || true
+          echo '=== SYMBOLIZED DISASSEMBLY CALLS ==='
+          llvm-objdump-18 --macho --disassemble --symbolize-operands patch.dylib > /tmp/dis.txt || true
+          grep -n -E 'class_getInstanceMethod|method_|objc_getClass|objc_lookUpClass|dlopen|dlsym|NSMutableURLRequest|NSUserDefaults|SecItemCopyMatching' /tmp/dis.txt | head -1000 || true
+          echo '=== CONTEXT AROUND RUNTIME CALLS ==='
+          python - <<'PY'
+          import re
+          lines=open('/tmp/dis.txt',errors='ignore').read().splitlines()
+          pats=re.compile(r'class_getInstanceMethod|method_|objc_getClass|objc_lookUpClass|dlopen|dlsym|SecItemCopyMatching|NSMutableURLRequest|NSUserDefaults',re.I)
+          idx=[i for i,x in enumerate(lines) if pats.search(x)]
+          seen=[]
+          for i in idx[:120]:
+              if any(abs(i-j)<15 for j in seen): continue
+              seen.append(i)
+              print(f'\n--- around line {i+1} ---')
+              for x in lines[max(0,i-18):min(len(lines),i+28)]: print(x)
+          PY
+      - name: Search likely dynamic target names
+        run: |
+          set -euo pipefail
+          strings -a -n 2 patch.dylib > /tmp/s.txt
+          echo '=== SELECTOR / CLASS TARGET CANDIDATES ==='
+          grep -Eai 'isVip|isSVIP|monthlySVIP|appleVip|giftVip|operationVip|isValid|trial|vip|svip|subscribe|receipt|purchase|request|URLSession|dataTask|sendRequest|response|token|header|signature|template|preset|ugc|waterfall|network|reachability|DNS|domain|error|toast|HUD|retry' /tmp/s.txt | sort -u | head -3000 || true
