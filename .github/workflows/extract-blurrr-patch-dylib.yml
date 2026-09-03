@@ -1,0 +1,59 @@
+name: Extract Blurrr Patch Dylib
+
+on:
+  push:
+    branches:
+      - temp/minimal-vip-networktest-20260902
+    paths:
+      - .github/workflows/extract-blurrr-patch-dylib.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download pinned Blurrr 2.3.56 patched IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL='https://github.com/apptesters-org/AppTesters_Repo/releases/download/23-04-2026/Blurrr_2.3.56_Premium_%40thisismanpreets_apptesters.org.ipa'
+          curl -L --fail --retry 4 --retry-delay 2 "$URL" -o blurrr.ipa
+          echo 'daeaf19e85746e3b3cbe6357c1399dfe0210a929783b2f8906d2104df5163335  blurrr.ipa' | sha256sum -c -
+
+      - name: Extract only injected dylib
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf extracted out
+          mkdir -p extracted out
+          unzip -q blurrr.ipa -d extracted
+          SRC="$(find extracted/Payload -type f -name 'BlurrrMusicVideoEditorPatch.dylib' -print -quit)"
+          test -n "$SRC"
+          cp "$SRC" out/BlurrrMusicVideoEditorPatch.dylib
+          file out/BlurrrMusicVideoEditorPatch.dylib
+          sha256sum out/BlurrrMusicVideoEditorPatch.dylib | tee out/BlurrrMusicVideoEditorPatch.dylib.sha256
+          ls -lh out/BlurrrMusicVideoEditorPatch.dylib
+
+      - name: Publish standalone dylib release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG='blurrr-dylib-only-2.3.56-temp'
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title 'Blurrr 2.3.56 Patch Dylib Only' \
+              --notes 'Standalone BlurrrMusicVideoEditorPatch.dylib extracted byte-for-byte from the pinned Blurrr 2.3.56 Premium IPA. No IPA or Aries executable modifications are included in this release.' \
+              --prerelease
+          fi
+          gh release upload "$TAG" \
+            out/BlurrrMusicVideoEditorPatch.dylib \
+            out/BlurrrMusicVideoEditorPatch.dylib.sha256 \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
