@@ -1,0 +1,87 @@
+name: Analyze BlurrrMusicVideoEditorPatch dylib
+
+on:
+  push:
+    branches:
+      - temp/blurrr-dylib-analysis-20260902
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download source containing dylib
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 --retry-delay 2 \
+            'https://github.com/apptesters-org/AppTesters_Repo/releases/download/23-04-2026/Blurrr_2.3.56_Premium_%40thisismanpreets_apptesters.org.ipa' \
+            -o source.ipa
+          echo 'daeaf19e85746e3b3cbe6357c1399dfe0210a929783b2f8906d2104df5163335  source.ipa' | sha256sum -c -
+          rm -rf work && mkdir work
+          unzip -q source.ipa -d work
+          DYLIB=$(find work -type f -name 'BlurrrMusicVideoEditorPatch.dylib' -print -quit)
+          test -n "$DYLIB"
+          cp "$DYLIB" ./BlurrrMusicVideoEditorPatch.dylib
+
+      - name: Basic metadata
+        run: |
+          set -euo pipefail
+          file BlurrrMusicVideoEditorPatch.dylib
+          ls -lh BlurrrMusicVideoEditorPatch.dylib
+          sha256sum BlurrrMusicVideoEditorPatch.dylib
+          stat -c 'size=%s mtime=%y' BlurrrMusicVideoEditorPatch.dylib
+
+      - name: Parse Mach-O with LIEF
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet lief
+          python - <<'PY'
+          import lief
+          p='BlurrrMusicVideoEditorPatch.dylib'
+          b=lief.parse(p)
+          print('=== MACH-O HEADER ===')
+          print('format:', type(b).__name__)
+          print('entrypoint:', hex(getattr(b,'entrypoint',0) or 0))
+          print('imagebase:', hex(getattr(b,'imagebase',0) or 0))
+          print('has_nx:', getattr(b,'has_nx',None))
+          print('\n=== LINKED LIBRARIES ===')
+          for x in getattr(b,'libraries',[]): print(x.name)
+          print('\n=== IMPORTED SYMBOLS (filtered) ===')
+          keys=('hook','objc','method','class','vip','svip','receipt','storekit','network','session','request','url','user','account','coin','juice','template','export','editor','purchase','subscription')
+          syms=[]
+          for s in getattr(b,'imported_symbols',[]):
+              n=s.name
+              if any(k in n.lower() for k in keys): syms.append(n)
+          for n in sorted(set(syms))[:1000]: print(n)
+          print('\n=== EXPORTED SYMBOLS ===')
+          for s in getattr(b,'exported_symbols',[]):
+              if s.name: print(s.name)
+          print('\n=== SECTIONS ===')
+          for s in getattr(b,'sections',[]): print(s.name, hex(s.virtual_address), s.size)
+          PY
+
+      - name: Extract meaningful strings
+        run: |
+          set -euo pipefail
+          strings -a -n 4 BlurrrMusicVideoEditorPatch.dylib > /tmp/all_strings.txt
+          echo '=== KEYWORD STRINGS ==='
+          grep -Eai 'vip|svip|premium|receipt|storekit|purchase|subscription|trial|applevip|giftvip|operationvip|network|session|request|https?://|api|token|user|account|login|juice|coin|template|favorite|favourite|export|editor|music|video|blurrr|aries|hook|substrate|ellekit|fishhook|method|selector|objc|NSUserDefaults' /tmp/all_strings.txt | sort -u | head -2000 || true
+          echo '=== OBJECTIVE-C / SWIFT-LIKE STRINGS ==='
+          grep -Ea '^(_TtC|[A-Z][A-Za-z0-9_]{2,}(View|Model|Manager|Helper|Controller|Handler|Repository|Service|Dao|Request|Response|Account|Receipt|Subscribe|VIP|SVIP))' /tmp/all_strings.txt | sort -u | head -2000 || true
+          echo '=== FIRST 500 PRINTABLE STRINGS ==='
+          head -500 /tmp/all_strings.txt
+
+      - name: Symbol table tools
+        run: |
+          set +e
+          echo '=== llvm-nm ==='
+          LLVMNM=$(command -v llvm-nm || command -v llvm-nm-18 || command -v llvm-nm-17 || true)
+          if [ -n "$LLVMNM" ]; then "$LLVMNM" -a BlurrrMusicVideoEditorPatch.dylib | head -2000; fi
+          echo '=== readelf fallback ==='
+          readelf -a BlurrrMusicVideoEditorPatch.dylib 2>&1 | head -1000
+          exit 0
