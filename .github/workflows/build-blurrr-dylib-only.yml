@@ -31,8 +31,11 @@ jobs:
           APP=$(find work/Payload -maxdepth 1 -type d -name '*.app' -print -quit)
           test -n "$APP"
           test -f "$APP/Aries"
-          test -f "$APP/BlurrrMusicVideoEditorPatch.dylib"
+          DYLIB=$(find "$APP" -type f -name 'BlurrrMusicVideoEditorPatch.dylib' -print -quit)
+          test -n "$DYLIB"
           echo "APP=$APP" >> "$GITHUB_ENV"
+          echo "DYLIB=$DYLIB" >> "$GITHUB_ENV"
+          echo "Resolved dylib path: $DYLIB"
 
       - name: Revert known direct Premium patches only
         run: |
@@ -71,7 +74,6 @@ jobs:
           p.write_bytes(b)
           print('reverted_bytes',changed)
           print('post_sha256',hashlib.sha256(b).hexdigest())
-          # hard verification: every known Premium patch location is stock now
           rb=p.read_bytes()
           for name,off,oldhex,newhex in patches:
               cur=rb[off:off+len(bytes.fromhex(oldhex))].hex()
@@ -83,8 +85,8 @@ jobs:
         run: |
           set -euo pipefail
           echo '=== DYLIB ==='
-          file "$APP/BlurrrMusicVideoEditorPatch.dylib"
-          sha256sum "$APP/BlurrrMusicVideoEditorPatch.dylib"
+          file "$DYLIB"
+          sha256sum "$DYLIB"
           echo '=== MAIN EXECUTABLE LOAD COMMAND ==='
           python -m pip install --quiet lief
           python - <<'PY'
