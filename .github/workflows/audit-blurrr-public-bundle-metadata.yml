@@ -1,0 +1,49 @@
+name: Audit Blurrr public bundle metadata
+
+on:
+  push:
+    branches:
+      - temp/blurrr-dylib-analysis-20260902
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch exact public source
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 --retry-delay 2 'https://github.com/apptesters-org/AppTesters_Repo/releases/download/23-04-2026/Blurrr_2.3.56_Premium_%40thisismanpreets_apptesters.org.ipa' -o source.ipa
+          echo 'daeaf19e85746e3b3cbe6357c1399dfe0210a929783b2f8906d2104df5163335  source.ipa' | sha256sum -c -
+          unzip -q source.ipa -d work
+          APP=$(find work/Payload -mindepth 1 -maxdepth 1 -type d -name '*.app' -print -quit)
+          echo "APP=$APP" >> "$GITHUB_ENV"
+      - name: Dump Info.plist and network-related metadata
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import plistlib,os,json
+          app=os.environ['APP']
+          p=os.path.join(app,'Info.plist')
+          with open(p,'rb') as f: d=plistlib.load(f)
+          print('=== INFO.PLIST JSON ===')
+          print(json.dumps(d,indent=2,sort_keys=True,default=str,ensure_ascii=False))
+          print('=== NETWORK/CONFIG KEYS ===')
+          for k,v in sorted(d.items()):
+              kl=k.lower()
+              if any(x in kl for x in ['transport','network','url','scheme','background','bundle','version','environment','ats','proxy','vpn','localnetwork']):
+                  print(k,repr(v))
+          PY
+      - name: Inventory suspicious config/resources
+        run: |
+          set -euo pipefail
+          echo '=== TOP LEVEL FILES ==='
+          find "$APP" -maxdepth 2 -type f -printf '%P\t%s\n' | sort | head -5000
+          echo '=== CONFIG-LIKE FILE HASHES ==='
+          find "$APP" -type f \( -iname '*.plist' -o -iname '*.json' -o -iname '*.strings' -o -iname '*.mobileconfig' -o -iname '*.cer' -o -iname '*.pem' -o -iname '*.der' -o -iname '*.txt' \) -print0 | while IFS= read -r -d '' f; do rel="${f#$APP/}"; printf '%s\t%s\t%s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "$(stat -c%s "$f")" "$rel"; done | sort
+          echo '=== DYLIBS / FRAMEWORKS ==='
+          find "$APP" -type f \( -name '*.dylib' -o -path '*/Frameworks/*' \) -printf '%P\t%s\n' | sort | head -5000
