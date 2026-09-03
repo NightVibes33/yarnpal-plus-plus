@@ -1,0 +1,77 @@
+name: Audit Blurrr dylib network implementations
+
+on:
+  push:
+    branches:
+      - temp/blurrr-dylib-analysis-20260902
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch exact dylib
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 --retry-delay 2 'https://github.com/apptesters-org/AppTesters_Repo/releases/download/23-04-2026/Blurrr_2.3.56_Premium_%40thisismanpreets_apptesters.org.ipa' -o source.ipa
+          echo 'daeaf19e85746e3b3cbe6357c1399dfe0210a929783b2f8906d2104df5163335  source.ipa' | sha256sum -c -
+          unzip -q source.ipa -d work
+          cp "$(find work -type f -name 'BlurrrMusicVideoEditorPatch.dylib' -print -quit)" patch.dylib
+      - name: Dump precise network implementation evidence
+        run: |
+          set -euo pipefail
+          llvm-objdump-18 --macho --objc-meta-data patch.dylib > /tmp/objc.txt || true
+          llvm-nm-18 -nm patch.dylib > /tmp/nm.txt || true
+          echo '=== ALL FOUNDATION/NETWORK/HOOK IMPORTS ==='
+          llvm-nm-18 -u patch.dylib | grep -Eai 'URL|HTTP|Session|Connection|Request|Response|socket|connect|send|recv|getaddr|Network|CFStream|CFHTTP|NW_|SecTrust|SecItem|dlopen|dlsym|class_get|method_|objc_getClass' | sort -u || true
+          echo '=== OBJC CLASSREFS FOR NETWORK ==='
+          grep -E '_OBJC_CLASS_\$_(NSURL|NSHTTP|NSMutableURLRequest|NSURLConnection|NSURLSession|WKWebView)' /tmp/objc.txt | sort -u || true
+          echo '=== REFRESH / RENEW / WEBHOOK METADATA ==='
+          grep -n -B30 -A45 -E 'VIPWebhookPuller|refreshFromRemote:|renewIfNeeded|canonicalEndpoint|rotateRefreshToken:completion:' /tmp/objc.txt | head -2500 || true
+          echo '=== C++ NETWORK-LIKE SYMBOLS ==='
+          grep -Eai 'RemoteConfig_Fetch|PurchaseHistory_Sync|TelemetryBatch_Flush|KeyVault_RotateSession|ServerContract_Validate|SubscriptionVerifier_Validate|UserLicense_CheckStatus|EntitlementGuard_Verify|DunningQueue_Flush|BillingCycle_Advance|OCSP|Webhook|HTTP|Network|Request' /tmp/nm.txt | head -1000 || true
+          python -m pip install --quiet lief capstone
+          python - <<'PY'
+          import re,subprocess,lief
+          from capstone import Cs,CS_ARCH_ARM64,CS_MODE_ARM
+          from capstone.arm64 import ARM64_OP_IMM
+          data=open('patch.dylib','rb').read(); b=lief.parse('patch.dylib')
+          objc=open('/tmp/objc.txt',errors='ignore').read().splitlines()
+          nm=open('/tmp/nm.txt',errors='ignore').read().splitlines()
+          wanted=['refreshFromRemote:','renewIfNeeded','canonicalEndpoint','rotateRefreshToken:completion:','start']
+          found=[]
+          current_class=''
+          for i,line in enumerate(objc):
+              m=re.search(r'name\s+0x[0-9a-fA-F]+\s+([A-Za-z_][A-Za-z0-9_]+)$',line.strip())
+              if m and i+1 < len(objc) and ('baseMethods' in '\n'.join(objc[i:i+12]) or 'Swift class' in '\n'.join(objc[max(0,i-8):i+5])):
+                  current_class=m.group(1)
+              m=re.search(r'name\s+0x[0-9a-fA-F]+\s+(.+)$',line.strip())
+              if m and m.group(1).strip() in wanted:
+                  sel=m.group(1).strip()
+                  imp=None
+                  for j in range(i+1,min(i+6,len(objc))):
+                      z=re.search(r'imp\s+0x([0-9a-fA-F]+)',objc[j])
+                      if z: imp=int(z.group(1),16); break
+                  if imp: found.append((current_class,sel,imp))
+          # C++ named functions from nm
+          for line in nm:
+              if any(k in line for k in ['RemoteConfig_Fetch','PurchaseHistory_Sync','TelemetryBatch_Flush','KeyVault_RotateSession','ServerContract_Validate','SubscriptionVerifier_Validate','UserLicense_CheckStatus','EntitlementGuard_Verify']):
+                  m=re.match(r'\s*([0-9a-fA-F]+)',line)
+                  if m: found.append(('C++',line.split()[-1],int(m.group(1),16)))
+          md=Cs(CS_ARCH_ARM64,CS_MODE_ARM); md.detail=True
+          seen=set()
+          for cls,sel,addr in found:
+              if addr in seen: continue
+              seen.add(addr)
+              print(f'\n=== DISASM {cls} {sel} @ {addr:#x} ===')
+              try: off=b.virtual_address_to_offset(addr)
+              except Exception as e: print('offset error',e); continue
+              for idx,ins in enumerate(md.disasm(data[off:off+0x500],addr)):
+                  print(f'{ins.address:#x}: {ins.mnemonic} {ins.op_str}')
+                  if ins.mnemonic=='ret' and idx>5: break
+                  if idx>180: break
+          PY
