@@ -1,0 +1,139 @@
+name: Publish Blurrr Minimal SVIP Network Test
+
+on:
+  push:
+    branches:
+      - temp/minimal-vip-networktest-20260902
+
+permissions:
+  contents: write
+
+concurrency:
+  group: blurrr-minimal-svip-networktest-2.3.56-temp
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Blurrr 2.3.56 source
+        run: |
+          curl -L --fail --retry 3 --retry-delay 2 \
+            'https://github.com/apptesters-org/AppTesters_Repo/releases/download/23-04-2026/Blurrr_2.3.56_Premium_%40thisismanpreets_apptesters.org.ipa' \
+            -o source.ipa
+          echo 'daeaf19e85746e3b3cbe6357c1399dfe0210a929783b2f8906d2104df5163335  source.ipa' | sha256sum -c -
+
+      - name: Sanitize injected repack and verify clean code region
+        run: |
+          rm -rf work && mkdir work
+          unzip -q source.ipa -d work
+          python - <<'PY'
+          import glob, hashlib, plistlib, struct
+          from pathlib import Path
+
+          app = Path(glob.glob('work/Payload/*.app')[0])
+          info = plistlib.loads((app / 'Info.plist').read_bytes())
+          if (info.get('CFBundleIdentifier'), info.get('CFBundleShortVersionString'), str(info.get('CFBundleVersion'))) != ('com.pinguo.msgAries', '2.3.56', '2356'):
+              raise SystemExit('Unexpected Blurrr build')
+
+          exe = app / info['CFBundleExecutable']
+          data = bytearray(exe.read_bytes())
+          magic, cputype, cpusubtype, filetype, ncmds, sizeofcmds, flags, reserved = struct.unpack_from('<IiiIIIII', data, 0)
+          if magic != 0xfeedfacf:
+              raise SystemExit('Unexpected Mach-O')
+
+          target = b'@rpath/BlurrrMusicVideoEditorPatch.dylib'
+          off = 32
+          target_off = target_size = None
+          for _ in range(ncmds):
+              cmd, cmdsize = struct.unpack_from('<II', data, off)
+              if cmd in (0xc, 0x80000018, 0x8000001f):
+                  nameoff = struct.unpack_from('<I', data, off + 8)[0]
+                  name = bytes(data[off + nameoff:off + cmdsize]).split(b'\0', 1)[0]
+                  if name == target:
+                      target_off, target_size = off, cmdsize
+                      break
+              off += cmdsize
+
+          if target_off is None or target_size != 72:
+              raise SystemExit('Expected injected Blurrr patch dylib load command not found')
+
+          commands_end = 32 + sizeofcmds
+          tail = bytes(data[target_off + target_size:commands_end])
+          data[target_off:target_off + len(tail)] = tail
+          data[target_off + len(tail):commands_end] = b'\0' * target_size
+          struct.pack_into('<I', data, 16, ncmds - 1)
+          struct.pack_into('<I', data, 20, sizeofcmds - target_size)
+          exe.write_bytes(data)
+
+          for injected in app.rglob('BlurrrMusicVideoEditorPatch.dylib'):
+              injected.unlink()
+
+          cleaned = exe.read_bytes()
+          region = cleaned[1024*1024:86*1024*1024]
+          actual = hashlib.sha256(region).hexdigest()
+          expected = 'c53ad7beda246abe2f4f9e3d1d2da665a9ab756cc13217c87c06a6181b306ea9'
+          if actual != expected:
+              raise SystemExit(f'Functional code region does not match clean uploaded IPA: {actual}')
+          if target in cleaned:
+              raise SystemExit('Injected dylib reference still present')
+          PY
+
+      - name: Apply minimal VIP plus SVIP local gates
+        run: |
+          python - <<'PY'
+          import glob, hashlib, plistlib
+          from pathlib import Path
+
+          app = Path(glob.glob('work/Payload/*.app')[0])
+          info = plistlib.loads((app / 'Info.plist').read_bytes())
+          exe = app / info['CFBundleExecutable']
+          data = bytearray(exe.read_bytes())
+          patches = [
+              ('isVip', 0x661A84),
+              ('monthlySVIPIsOpen', 0x665390),
+          ]
+          old = bytes.fromhex('f44fbea9fd7b01a9')
+          new = bytes.fromhex('20008052c0035fd6')
+          for name, offset in patches:
+              actual = bytes(data[offset:offset+8])
+              if actual != old:
+                  raise SystemExit(f'Unexpected {name} bytes at {offset:#x}: {actual.hex()}')
+              data[offset:offset+8] = new
+          exe.write_bytes(data)
+          verify = exe.read_bytes()
+          for name, offset in patches:
+              if verify[offset:offset+8] != new:
+                  raise SystemExit(f'{name} patch verification failed')
+          region_sha = hashlib.sha256(verify[1024*1024:86*1024*1024]).hexdigest()
+          expected_region_sha = 'f085ef255fc2c9e3be4b1e4c5409bf8934ecde519c0844f2227a95e8b6d3c3e8'
+          print('Patched functional code-region SHA-256:', region_sha)
+          if region_sha != expected_region_sha:
+              raise SystemExit('More than the intended two local entitlement changes are present')
+          PY
+
+          find work/Payload -type d -name _CodeSignature -prune -exec rm -rf {} +
+          rm -f work/Payload/*.app/embedded.mobileprovision || true
+          (cd work && zip -qry ../Blurrr-2.3.56-MinimalSVIP-NetworkTest-unsigned.ipa .)
+          unzip -tq Blurrr-2.3.56-MinimalSVIP-NetworkTest-unsigned.ipa
+          sha256sum Blurrr-2.3.56-MinimalSVIP-NetworkTest-unsigned.ipa | tee Blurrr-2.3.56-MinimalSVIP-NetworkTest-unsigned.sha256
+
+      - name: Publish separate SVIP temp release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: blurrr-minimal-svip-networktest-2.3.56-temp
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; refusing to replace any release."
+            exit 1
+          fi
+          gh release create "$TAG" \
+            Blurrr-2.3.56-MinimalSVIP-NetworkTest-unsigned.ipa \
+            Blurrr-2.3.56-MinimalSVIP-NetworkTest-unsigned.sha256 \
+            --target "${GITHUB_SHA}" \
+            --title "Blurrr 2.3.56 Minimal SVIP Network Test (Temp)" \
+            --notes "Separate test release. Existing Blurrr releases are untouched. The injected BlurrrMusicVideoEditorPatch.dylib load command is removed first. Only MSUserDefaultHelper.isVip and MSUserDefaultHelper.monthlySVIPIsOpen are forced true. Receipt, subscription, Juice, and account models remain untouched."
