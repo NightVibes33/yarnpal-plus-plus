@@ -1,0 +1,123 @@
+name: Build Blurrr dylib-only test
+
+on:
+  push:
+    branches:
+      - temp/blurrr-dylib-analysis-20260902
+
+permissions:
+  contents: write
+
+concurrency:
+  group: blurrr-dylib-only-test
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download known Blurrr repack containing dylib
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 --retry-delay 2 \
+            'https://github.com/apptesters-org/AppTesters_Repo/releases/download/23-04-2026/Blurrr_2.3.56_Premium_%40thisismanpreets_apptesters.org.ipa' \
+            -o source.ipa
+          echo 'daeaf19e85746e3b3cbe6357c1399dfe0210a929783b2f8906d2104df5163335  source.ipa' | sha256sum -c -
+          rm -rf work && mkdir work
+          unzip -q source.ipa -d work
+          APP=$(find work/Payload -maxdepth 1 -type d -name '*.app' -print -quit)
+          test -n "$APP"
+          test -f "$APP/Aries"
+          test -f "$APP/BlurrrMusicVideoEditorPatch.dylib"
+          echo "APP=$APP" >> "$GITHUB_ENV"
+
+      - name: Revert known direct Premium patches only
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import os, hashlib
+          p=Path(os.environ['APP'])/'Aries'
+          b=bytearray(p.read_bytes())
+          patches=[
+            ('MSUserDefaultHelper.isVip',0x661a84,'f44fbea9fd7b01a9','20008052c0035fd6'),
+            ('MSUserDefaultHelper.monthlySVIPIsOpen',0x665390,'f44fbea9fd7b01a9','20008052c0035fd6'),
+            ('MSCheckIAPReceiptModel.isTrialPeriod',0x31f55c,'687a02f008cd47f9','00008052c0035fd6'),
+            ('MSCheckIAPReceiptModel.appleVip',0x31f60c,'687a02f008e547f9','20008052c0035fd6'),
+            ('MSCheckIAPReceiptModel.operationVip',0x31f62c,'687a02f008e947f9','20008052c0035fd6'),
+            ('MSCheckIAPReceiptModel.giftVip',0x31f64c,'687a02f008ed47f9','20008052c0035fd6'),
+            ('PSAutoSubscribeModel.isValid',0x367b4b8,'002c40fd0820601e','20008052c0035fd6'),
+            ('PSAutoSubscribeModel.isTrialPeriod',0x367c45c,'00204039c0035fd6','00008052c0035fd6'),
+            ('PSAutoSubscribeModel.appleVip',0x367c46c,'00244039c0035fd6','20008052c0035fd6'),
+            ('PSAutoSubscribeModel.giftVip',0x367c47c,'00284039c0035fd6','20008052c0035fd6'),
+            ('PSAutoSubscribeModel.operationVip',0x367c48c,'002c4039c0035fd6','20008052c0035fd6'),
+          ]
+          print('pre_sha256',hashlib.sha256(b).hexdigest())
+          changed=0
+          for name,off,oldhex,newhex in patches:
+              old=bytes.fromhex(oldhex); new=bytes.fromhex(newhex)
+              cur=bytes(b[off:off+len(old)])
+              if cur==new:
+                  b[off:off+len(old)]=old
+                  changed += len(old)
+                  print('REVERTED',name,hex(off),newhex,'->',oldhex)
+              elif cur==old:
+                  print('ALREADY_STOCK',name,hex(off),oldhex)
+              else:
+                  raise SystemExit(f'UNEXPECTED {name} {off:#x}: {cur.hex()}')
+          p.write_bytes(b)
+          print('reverted_bytes',changed)
+          print('post_sha256',hashlib.sha256(b).hexdigest())
+          # hard verification: every known Premium patch location is stock now
+          rb=p.read_bytes()
+          for name,off,oldhex,newhex in patches:
+              cur=rb[off:off+len(bytes.fromhex(oldhex))].hex()
+              assert cur==oldhex,(name,hex(off),cur,oldhex)
+          print('ALL_KNOWN_PREMIUM_OFFSETS_STOCK=YES')
+          PY
+
+      - name: Verify dylib and loader remain present
+        run: |
+          set -euo pipefail
+          echo '=== DYLIB ==='
+          file "$APP/BlurrrMusicVideoEditorPatch.dylib"
+          sha256sum "$APP/BlurrrMusicVideoEditorPatch.dylib"
+          echo '=== MAIN EXECUTABLE LOAD COMMAND ==='
+          python -m pip install --quiet lief
+          python - <<'PY'
+          import lief, os
+          p=os.path.join(os.environ['APP'],'Aries')
+          b=lief.parse(p)
+          libs=[x.name for x in b.libraries]
+          for x in libs: print(x)
+          target=[x for x in libs if 'BlurrrMusicVideoEditorPatch.dylib' in x]
+          assert target, 'dylib load command missing'
+          print('DYLIB_LOAD_COMMAND_PRESENT=YES',target)
+          PY
+
+      - name: Strip signatures and package unsigned IPA
+        run: |
+          set -euo pipefail
+          rm -rf "$APP/_CodeSignature" "$APP/embedded.mobileprovision"
+          find "$APP" -name 'CodeResources' -delete || true
+          (cd work && zip -qry ../Blurrr-2.3.56-DylibOnly-NoDirectPremiumPatches-unsigned.ipa Payload)
+          unzip -tq Blurrr-2.3.56-DylibOnly-NoDirectPremiumPatches-unsigned.ipa
+          sha256sum Blurrr-2.3.56-DylibOnly-NoDirectPremiumPatches-unsigned.ipa | tee Blurrr-2.3.56-DylibOnly-NoDirectPremiumPatches-unsigned.sha256
+
+      - name: Publish isolated test release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG='blurrr-dylib-only-test-20260902'
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" \
+            Blurrr-2.3.56-DylibOnly-NoDirectPremiumPatches-unsigned.ipa \
+            Blurrr-2.3.56-DylibOnly-NoDirectPremiumPatches-unsigned.sha256 \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title 'Blurrr 2.3.56 dylib-only test' \
+            --notes 'Diagnostic build. Keeps BlurrrMusicVideoEditorPatch.dylib and its existing loader injection. Reverts all 11 known direct executable Premium/SVIP/receipt/subscription patches to stock bytes. No Juice patch. Unsigned; must be signed by the tester.'
