@@ -1,0 +1,168 @@
+name: Publish TikTok TTKillerPlus NoPayment v2
+
+on:
+  push:
+    branches:
+      - temp/ikghd-free-release
+    paths:
+      - .github/workflows/release-tiktok-v2.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install browser tooling
+        shell: bash
+        run: |
+          set -euxo pipefail
+          npm init -y >/dev/null 2>&1
+          npm install playwright@latest
+          npx playwright install chromium
+
+      - name: Download original TikTok IPA
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p downloads work out
+          cat > fetch.mjs <<'JS'
+          import { chromium } from 'playwright';
+          import fs from 'fs';
+          const browser = await chromium.launch({headless:true,args:['--disable-blink-features=AutomationControlled','--no-sandbox']});
+          const context = await browser.newContext({acceptDownloads:true,locale:'en-US',timezoneId:'America/Chicago',userAgent:'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'});
+          const page = await context.newPage();
+          const resp = await page.goto('https://repo.ikghd.me/TTKPlus',{waitUntil:'networkidle',timeout:90000});
+          console.log('page status', resp?.status());
+          const filename='TikTok_46.8_TTKillerPlus_2.1.ipa';
+          const links=await page.locator('a').evaluateAll(as=>as.map(a=>({href:a.href,text:(a.textContent||'').trim()})));
+          const target=links.find(x=>x.href.includes(filename));
+          if(!target) throw new Error('TikTok source IPA link not found');
+          const [download]=await Promise.all([page.waitForEvent('download',{timeout:120000}),page.locator(`a[href="${target.href}"]`).first().click({timeout:30000})]);
+          const failure=await download.failure(); if(failure) throw new Error(failure);
+          await download.saveAs('downloads/source.ipa');
+          console.log('downloaded', fs.statSync('downloads/source.ipa').size);
+          await browser.close();
+          JS
+          node fetch.mjs
+          unzip -q downloads/source.ipa -d work
+          test -f work/Payload/TikTok.app/Frameworks/TTKPlus.dylib
+          test -f work/Payload/TikTok.app/Frameworks/CydiaSubstrate.framework/CydiaSubstrate
+
+      - name: Patch TTKillerPlus and flatten Substrate dependency
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib, shutil, json
+
+          dylib=Path('work/Payload/TikTok.app/Frameworks/TTKPlus.dylib')
+          substrate=Path('work/Payload/TikTok.app/Frameworks/CydiaSubstrate.framework/CydiaSubstrate')
+          expected='0f7e30a14d041788177085ba499a1d04aa7c084b4eacc43adbac87355da29e5d'
+          raw=dylib.read_bytes()
+          got=hashlib.sha256(raw).hexdigest()
+          if got != expected:
+              raise SystemExit(f'source TTKPlus hash changed: {got}')
+
+          RET=bytes.fromhex('c0035fd6')
+          TRUE_RET=bytes.fromhex('20008052c0035fd6')
+          NIL_RET=bytes.fromhex('000080d2c0035fd6')
+          OLD=b'@rpath/CydiaSubstrate.framework/CydiaSubstrate\0'
+          NEW=b'@loader_path/CydiaSubstrate.dylib\0'
+
+          data=bytearray(raw)
+          if data.count(OLD) != 1:
+              raise SystemExit(f'expected one Substrate load path, got {data.count(OLD)}')
+          idx=data.find(OLD)
+          data[idx:idx+len(OLD)] = NEW + b'\0'*(len(OLD)-len(NEW))
+
+          void_offsets={
+            0x3fdd8:'loadCheckoutContent',
+            0x40594:'handlePaymentWithScheme:method:',
+            0x40670:'handleBuyNewPayment:',
+            0x40744:'handleRenewalPayment:',
+            0x407f4:'handleStoreBuyPayment:',
+            0x40838:'handleStoreAddPayment:',
+            0x408c0:'loadPaymentURL:openExternally:',
+            0x41a34:'promptForActivation',
+            0x42878:'showRestoreProcessChangedAlert',
+            0x436e0:'promptForRestore',
+            0x43acc:'promptForLicenseKeyWithEmail:',
+            0x44b20:'restoreLicenseWithEmail:',
+            0x45950:'showUnlinkConfirmationForKey:email:device:',
+            0x471b0:'unlinkEmailFromKey:email:device:',
+            0x4793c:'authenticateUserWithEmail:licenseKey:',
+            0x48324:'verifyLicenseWithEmail:licenseKey:deviceIdentifier:',
+            0x49fdc:'checkAuthenticationStatus',
+            0x4b038:'settingsTkVerify',
+            0x4bc1c:'showInvalidLicenseText',
+            0x5225c:'_setupActivationCell:',
+          }
+          true_offsets={0x4b958:'isValidLicenseKey:'}
+          nil_offsets={
+            0x40468:'getCheckoutForBuyNewHTMLContent',
+            0x40474:'getCheckoutForSubscribeHTMLContent',
+            0x404bc:'getCheckoutForStoreBuyHTMLContent',
+            0x40504:'getCheckoutForStoreADDHTMLContent',
+            0x4087c:'getPaymentURLForMethod:type:',
+            0x73754:'initWithCheckoutMode:',
+          }
+
+          for off,name in void_offsets.items(): data[off:off+4]=RET
+          for off,name in true_offsets.items(): data[off:off+8]=TRUE_RET
+          for off,name in nil_offsets.items(): data[off:off+8]=NIL_RET
+
+          dylib.write_bytes(data)
+          patched=hashlib.sha256(data).hexdigest()
+          expected_patched='f729fd8d5cc21c220676b3f86ba21c4f7fd7369e536900547b58f02a02651d6a'
+          if patched != expected_patched:
+              raise SystemExit(f'patched TTKPlus hash mismatch: {patched}')
+
+          flat=Path('work/Payload/TikTok.app/Frameworks/CydiaSubstrate.dylib')
+          shutil.copy2(substrate, flat)
+          substrate_sha=hashlib.sha256(flat.read_bytes()).hexdigest()
+          expected_substrate='376ae6f5e9884f8c80110cec6eb657b3526c95d2d90e095fa637a09588e66cf7'
+          if substrate_sha != expected_substrate:
+              raise SystemExit(f'Substrate hash mismatch: {substrate_sha}')
+
+          Path('out/PATCH_INFO.json').write_text(json.dumps({
+            'source_ttk_sha256':got,
+            'patched_ttk_sha256':patched,
+            'substrate_sha256':substrate_sha,
+            'substrate_dependency':'@loader_path/CydiaSubstrate.dylib'
+          },indent=2))
+          print('TTKPlus patched and validated:', patched)
+          PY
+
+      - name: Package IPA
+        shell: bash
+        run: |
+          set -euxo pipefail
+          find work/Payload -name _CodeSignature -type d -prune -exec rm -rf {} + || true
+          (cd work && zip -qry -y ../out/TikTok_TTKillerPlus_NoPayment_v2.ipa Payload)
+          unzip -tq out/TikTok_TTKillerPlus_NoPayment_v2.ipa
+          sha256sum out/TikTok_TTKillerPlus_NoPayment_v2.ipa | tee out/SHA256SUMS.txt
+          ls -lh out/TikTok_TTKillerPlus_NoPayment_v2.ipa
+
+      - name: Publish GitHub Release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          TAG='ttkillerplus-nopayment-v2'
+          ASSET='out/TikTok_TTKillerPlus_NoPayment_v2.ipa'
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ASSET" --clobber
+          else
+            gh release create "$TAG" "$ASSET" \
+              --target "$GITHUB_SHA" \
+              --title 'TikTok + TTKillerPlus NoPayment v2' \
+              --notes 'Corrected TTKillerPlus v2 build with flattened CydiaSubstrate dependency for LiveContainer-style loading.'
+          fi
+          gh release view "$TAG" --json url,assets
