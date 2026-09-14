@@ -9,51 +9,92 @@ on:
 permissions:
   contents: read
 
-env:
-  TIKTOK_URL: https://ikghd.site/ipa/TikTok_46.8_TTKillerPlus_2.1.ipa
-  YOUTUBE_URL: https://ikghd.site/ipa/YouTube_21.37_YTKillerPlus_6.5.ipa
-
 jobs:
   fetch-and-extract:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download source IPAs
+      - name: Install browser tooling
+        shell: bash
+        run: |
+          set -euxo pipefail
+          npm init -y >/dev/null 2>&1
+          npm install playwright@latest
+          npx playwright install chromium
+
+      - name: Download IPAs through source pages
         shell: bash
         run: |
           set -euxo pipefail
           mkdir -p downloads extracted/tiktok extracted/youtube dylibs/tiktok dylibs/youtube
-          UA='Mozilla/5.0 (iPhone; CPU iPhone OS 27_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Mobile/15E148 Safari/604.1'
-          touch cookies.txt
+          cat > /tmp/fetch.mjs <<'JS'
+          import { chromium } from 'playwright';
+          import fs from 'fs';
+          import path from 'path';
 
-          # Establish a same-site browser session first.
-          curl --http1.1 -sS -L --compressed -A "$UA" -c cookies.txt -b cookies.txt \
-            -H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' \
-            https://ikghd.site/ -o /tmp/home.html || true
-          curl --http1.1 -sS -L --compressed -A "$UA" -c cookies.txt -b cookies.txt \
-            -H 'Accept: application/json,text/plain,*/*' -H 'Referer: https://ikghd.site/' \
-            https://ikghd.site/repo.json -o /tmp/repo.json || true
-          echo 'Session cookies:'; cat cookies.txt || true
+          const browser = await chromium.launch({
+            headless: true,
+            args: ['--disable-blink-features=AutomationControlled', '--no-sandbox']
+          });
+          const context = await browser.newContext({
+            acceptDownloads: true,
+            locale: 'en-US',
+            timezoneId: 'America/Chicago',
+            userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
+            viewport: { width: 1440, height: 1000 },
+            extraHTTPHeaders: {
+              'Accept-Language': 'en-US,en;q=0.9',
+              'Upgrade-Insecure-Requests': '1'
+            }
+          });
 
-          fetch_ipa() {
-            local url="$1" out="$2"
-            for ref in 'https://ikghd.site/' 'https://ikghd.site/repo.json' 'https://repo.ikghd.me/' ; do
-              echo "Trying $url with referer $ref"
-              if curl --http1.1 --fail --location --compressed \
-                -A "$UA" -c cookies.txt -b cookies.txt \
-                -H 'Accept: application/octet-stream,application/zip,*/*;q=0.8' \
-                -H "Referer: $ref" \
-                -H 'Sec-Fetch-Dest: document' -H 'Sec-Fetch-Mode: navigate' -H 'Sec-Fetch-Site: same-site' \
-                "$url" -o "$out"; then
-                return 0
-              fi
-            done
-            return 1
+          async function downloadFromPackage(pageUrl, filename, outPath) {
+            const page = await context.newPage();
+            console.log('Opening', pageUrl);
+            const resp = await page.goto(pageUrl, { waitUntil: 'networkidle', timeout: 90000 });
+            console.log('page status', resp?.status());
+            await page.waitForTimeout(1500);
+            const links = await page.locator('a').evaluateAll(as => as.map(a => ({ text: (a.textContent || '').trim(), href: a.href })));
+            console.log('candidate links', links.filter(x => /\.ipa(?:$|\?)/i.test(x.href)));
+            const target = links.find(x => x.href.includes(filename));
+            if (!target) throw new Error(`Could not find ${filename} on ${pageUrl}`);
+            const locator = page.locator(`a[href="${target.href}"]`).first();
+            const [download] = await Promise.all([
+              page.waitForEvent('download', { timeout: 120000 }),
+              locator.click({ timeout: 30000 })
+            ]);
+            console.log('suggested filename', download.suggestedFilename());
+            const failure = await download.failure();
+            if (failure) throw new Error(`Download failed: ${failure}`);
+            await download.saveAs(outPath);
+            const stat = fs.statSync(outPath);
+            console.log(outPath, stat.size);
+            await page.close();
           }
 
-          fetch_ipa "$TIKTOK_URL" downloads/TikTok_46.8_TTKillerPlus_2.1.ipa
-          fetch_ipa "$YOUTUBE_URL" downloads/YouTube_21.37_YTKillerPlus_6.5.ipa
+          await downloadFromPackage(
+            'https://repo.ikghd.me/TTKPlus',
+            'TikTok_46.8_TTKillerPlus_2.1.ipa',
+            'downloads/TikTok_46.8_TTKillerPlus_2.1.ipa'
+          );
+
+          // Resolve the YouTube package page from the repo itself so the source controls the path.
+          const home = await context.newPage();
+          await home.goto('https://repo.ikghd.me/', { waitUntil: 'networkidle', timeout: 90000 });
+          const homeLinks = await home.locator('a').evaluateAll(as => as.map(a => ({ text: (a.textContent || '').trim(), href: a.href })));
+          const ytPage = homeLinks.find(x => /YTKillerPlus/i.test(x.text) || /YTKPlus/i.test(x.href))?.href || 'https://repo.ikghd.me/YTKPlus';
+          console.log('YouTube package page', ytPage);
+          await home.close();
+          await downloadFromPackage(
+            ytPage,
+            'YouTube_21.37_YTKillerPlus_6.5.ipa',
+            'downloads/YouTube_21.37_YTKillerPlus_6.5.ipa'
+          );
+
+          await browser.close();
+          JS
+          node /tmp/fetch.mjs
           file downloads/*.ipa
           ls -lh downloads/*.ipa
 
