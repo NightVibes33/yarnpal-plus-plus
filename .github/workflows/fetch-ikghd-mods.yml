@@ -24,17 +24,36 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p downloads extracted/tiktok extracted/youtube dylibs/tiktok dylibs/youtube
-          UA='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36'
-          curl --fail --location --retry 4 --retry-all-errors --compressed \
-            -A "$UA" \
-            -H 'Accept: application/octet-stream,*/*;q=0.8' \
-            -H 'Referer: https://repo.ikghd.me/TTKPlus' \
-            "$TIKTOK_URL" -o downloads/TikTok_46.8_TTKillerPlus_2.1.ipa
-          curl --fail --location --retry 4 --retry-all-errors --compressed \
-            -A "$UA" \
-            -H 'Accept: application/octet-stream,*/*;q=0.8' \
-            -H 'Referer: https://repo.ikghd.me/' \
-            "$YOUTUBE_URL" -o downloads/YouTube_21.37_YTKillerPlus_6.5.ipa
+          UA='Mozilla/5.0 (iPhone; CPU iPhone OS 27_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Mobile/15E148 Safari/604.1'
+          touch cookies.txt
+
+          # Establish a same-site browser session first.
+          curl --http1.1 -sS -L --compressed -A "$UA" -c cookies.txt -b cookies.txt \
+            -H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' \
+            https://ikghd.site/ -o /tmp/home.html || true
+          curl --http1.1 -sS -L --compressed -A "$UA" -c cookies.txt -b cookies.txt \
+            -H 'Accept: application/json,text/plain,*/*' -H 'Referer: https://ikghd.site/' \
+            https://ikghd.site/repo.json -o /tmp/repo.json || true
+          echo 'Session cookies:'; cat cookies.txt || true
+
+          fetch_ipa() {
+            local url="$1" out="$2"
+            for ref in 'https://ikghd.site/' 'https://ikghd.site/repo.json' 'https://repo.ikghd.me/' ; do
+              echo "Trying $url with referer $ref"
+              if curl --http1.1 --fail --location --compressed \
+                -A "$UA" -c cookies.txt -b cookies.txt \
+                -H 'Accept: application/octet-stream,application/zip,*/*;q=0.8' \
+                -H "Referer: $ref" \
+                -H 'Sec-Fetch-Dest: document' -H 'Sec-Fetch-Mode: navigate' -H 'Sec-Fetch-Site: same-site' \
+                "$url" -o "$out"; then
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          fetch_ipa "$TIKTOK_URL" downloads/TikTok_46.8_TTKillerPlus_2.1.ipa
+          fetch_ipa "$YOUTUBE_URL" downloads/YouTube_21.37_YTKillerPlus_6.5.ipa
           file downloads/*.ipa
           ls -lh downloads/*.ipa
 
@@ -53,10 +72,8 @@ jobs:
           find extracted/youtube -type f \( -iname '*.dylib' -o -path '*/Frameworks/*' \) -print > dylibs/youtube/files.txt || true
           while IFS= read -r f; do [ -f "$f" ] || continue; mkdir -p "dylibs/tiktok/$(dirname "$f")"; cp -p "$f" "dylibs/tiktok/$f"; done < dylibs/tiktok/files.txt
           while IFS= read -r f; do [ -f "$f" ] || continue; mkdir -p "dylibs/youtube/$(dirname "$f")"; cp -p "$f" "dylibs/youtube/$f"; done < dylibs/youtube/files.txt
-          echo 'TikTok candidates:'
-          cat dylibs/tiktok/files.txt || true
-          echo 'YouTube candidates:'
-          cat dylibs/youtube/files.txt || true
+          echo 'TikTok candidates:'; cat dylibs/tiktok/files.txt || true
+          echo 'YouTube candidates:'; cat dylibs/youtube/files.txt || true
 
       - name: Upload source IPAs
         uses: actions/upload-artifact@v4
