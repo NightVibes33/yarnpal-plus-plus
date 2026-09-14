@@ -1,0 +1,73 @@
+name: Fetch iKG mod IPAs
+
+on:
+  push:
+    branches:
+      - temp/ikghd-free-release
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TIKTOK_URL: https://ikghd.site/ipa/TikTok_46.8_TTKillerPlus_2.1.ipa
+  YOUTUBE_URL: https://ikghd.site/ipa/YouTube_21.37_YTKillerPlus_6.5.ipa
+
+jobs:
+  fetch-and-extract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download source IPAs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p downloads extracted/tiktok extracted/youtube dylibs/tiktok dylibs/youtube
+          UA='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36'
+          curl --fail --location --retry 4 --retry-all-errors --compressed \
+            -A "$UA" \
+            -H 'Accept: application/octet-stream,*/*;q=0.8' \
+            -H 'Referer: https://repo.ikghd.me/TTKPlus' \
+            "$TIKTOK_URL" -o downloads/TikTok_46.8_TTKillerPlus_2.1.ipa
+          curl --fail --location --retry 4 --retry-all-errors --compressed \
+            -A "$UA" \
+            -H 'Accept: application/octet-stream,*/*;q=0.8' \
+            -H 'Referer: https://repo.ikghd.me/' \
+            "$YOUTUBE_URL" -o downloads/YouTube_21.37_YTKillerPlus_6.5.ipa
+          file downloads/*.ipa
+          ls -lh downloads/*.ipa
+
+      - name: Extract IPA contents
+        shell: bash
+        run: |
+          set -euxo pipefail
+          unzip -q downloads/TikTok_46.8_TTKillerPlus_2.1.ipa -d extracted/tiktok
+          unzip -q downloads/YouTube_21.37_YTKillerPlus_6.5.ipa -d extracted/youtube
+
+      - name: Collect injected dylibs and frameworks
+        shell: bash
+        run: |
+          set -euxo pipefail
+          find extracted/tiktok -type f \( -iname '*.dylib' -o -path '*/Frameworks/*' \) -print > dylibs/tiktok/files.txt || true
+          find extracted/youtube -type f \( -iname '*.dylib' -o -path '*/Frameworks/*' \) -print > dylibs/youtube/files.txt || true
+          while IFS= read -r f; do [ -f "$f" ] || continue; mkdir -p "dylibs/tiktok/$(dirname "$f")"; cp -p "$f" "dylibs/tiktok/$f"; done < dylibs/tiktok/files.txt
+          while IFS= read -r f; do [ -f "$f" ] || continue; mkdir -p "dylibs/youtube/$(dirname "$f")"; cp -p "$f" "dylibs/youtube/$f"; done < dylibs/youtube/files.txt
+          echo 'TikTok candidates:'
+          cat dylibs/tiktok/files.txt || true
+          echo 'YouTube candidates:'
+          cat dylibs/youtube/files.txt || true
+
+      - name: Upload source IPAs
+        uses: actions/upload-artifact@v4
+        with:
+          name: ikghd-source-ipas
+          path: downloads/*.ipa
+          retention-days: 3
+
+      - name: Upload extracted dylibs
+        uses: actions/upload-artifact@v4
+        with:
+          name: ikghd-extracted-dylibs
+          path: dylibs
+          retention-days: 7
