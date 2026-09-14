@@ -1,4 +1,4 @@
-name: Fetch iKG mod IPAs
+name: Build free iKG mod IPAs
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  fetch-and-extract:
+  patch-and-package:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,11 +23,11 @@ jobs:
           npm install playwright@latest
           npx playwright install chromium
 
-      - name: Download IPAs through source pages
+      - name: Download source IPAs through source pages
         shell: bash
         run: |
           set -euxo pipefail
-          mkdir -p downloads extracted/tiktok extracted/youtube dylibs/tiktok dylibs/youtube
+          mkdir -p downloads extracted/tiktok extracted/youtube out patched-dylibs
           cat > fetch.mjs <<'JS'
           import { chromium } from 'playwright';
           import fs from 'fs';
@@ -49,7 +49,6 @@ jobs:
           });
 
           async function saveDownload(download, outPath) {
-            console.log('suggested filename', download.suggestedFilename());
             const failure = await download.failure();
             if (failure) throw new Error(`Download failed: ${failure}`);
             await download.saveAs(outPath);
@@ -58,13 +57,11 @@ jobs:
 
           async function downloadFromPackage(pageUrl, filename, outPath) {
             const page = await context.newPage();
-            console.log('Opening', pageUrl);
             const resp = await page.goto(pageUrl, { waitUntil: 'networkidle', timeout: 90000 });
-            console.log('page status', resp?.status());
+            console.log('page status', resp?.status(), pageUrl);
             await page.waitForTimeout(1200);
             const links = await page.locator('a').evaluateAll(as => as.map(a => ({ text: (a.textContent || '').trim(), href: a.href })));
             const target = links.find(x => x.href.includes(filename));
-            console.log('target', target);
             if (!target) throw new Error(`Could not find ${filename} on ${pageUrl}`);
             const [download] = await Promise.all([
               page.waitForEvent('download', { timeout: 120000 }),
@@ -116,28 +113,168 @@ jobs:
           set -euxo pipefail
           unzip -q downloads/TikTok_46.8_TTKillerPlus_2.1.ipa -d extracted/tiktok
           unzip -q downloads/YouTube_21.37_YTKillerPlus_6.5.ipa -d extracted/youtube
+          test -f extracted/tiktok/Payload/TikTok.app/Frameworks/TTKPlus.dylib
+          test -f extracted/youtube/Payload/YouTube.app/Frameworks/YTKPlus.dylib
 
-      - name: Collect injected dylibs and frameworks
+      - name: Patch tweak-owned licensing and payment gates
         shell: bash
         run: |
           set -euxo pipefail
-          find extracted/tiktok -type f \( -iname '*.dylib' -o -path '*/Frameworks/*' \) -print > dylibs/tiktok/files.txt || true
-          find extracted/youtube -type f \( -iname '*.dylib' -o -path '*/Frameworks/*' \) -print > dylibs/youtube/files.txt || true
-          while IFS= read -r f; do [ -f "$f" ] || continue; mkdir -p "dylibs/tiktok/$(dirname "$f")"; cp -p "$f" "dylibs/tiktok/$f"; done < dylibs/tiktok/files.txt
-          while IFS= read -r f; do [ -f "$f" ] || continue; mkdir -p "dylibs/youtube/$(dirname "$f")"; cp -p "$f" "dylibs/youtube/$f"; done < dylibs/youtube/files.txt
-          echo 'TikTok candidates:'; cat dylibs/tiktok/files.txt || true
-          echo 'YouTube candidates:'; cat dylibs/youtube/files.txt || true
+          cat > patch_free.py <<'PY'
+          from pathlib import Path
+          import hashlib, json, shutil
 
-      - name: Upload source IPAs
+          RET = bytes.fromhex('c0035fd6')
+          TRUE_RET = bytes.fromhex('20008052c0035fd6')
+
+          targets = {
+            'TTKPlus.dylib': {
+              'path': Path('extracted/tiktok/Payload/TikTok.app/Frameworks/TTKPlus.dylib'),
+              'void': {
+                0x40670: ('handlePaymentWithScheme:method:', 'f657bda9'),
+                0x40744: ('handleBuyNewPayment:', 'f657bda9'),
+                0x407f4: ('handleRenewalPayment:', 'f44fbea9'),
+                0x40838: ('handleStoreBuyPayment:', 'f44fbea9'),
+                0x4087c: ('handleStoreAddPayment:', 'f44fbea9'),
+                0x42878: ('promptForActivation', 'ff8302d1'),
+                0x4ade0: ('checkAuthenticationStatus', 'ff0301d1'),
+                0x4b924: ('settingsTkVerify', 'f44fbea9'),
+                0x526e8: ('_setupActivationCell:', 'ffc303d1'),
+              },
+              'true': {
+                0x4b9d8: ('isValidLicenseKey:', 'f44fbea9fd7b01a9'),
+              }
+            },
+            'YTKPlus.dylib': {
+              'path': Path('extracted/youtube/Payload/YouTube.app/Frameworks/YTKPlus.dylib'),
+              'void': {
+                0x11bc90: ('handlePaymentWithScheme:method:', 'f657bda9'),
+                0x11bd64: ('handleBuyNewPayment:', 'f657bda9'),
+                0x11be14: ('handleRenewalPayment:', 'f44fbea9'),
+                0x11be58: ('handleStoreBuyPayment:', 'f44fbea9'),
+                0x11be9c: ('handleStoreAddPayment:', 'f44fbea9'),
+                0x105480: ('iKarwanYTKIcon.checkAuthenticationStatus', 'e923b96d'),
+                0x11e5a4: ('promptForActivation', 'ff8302d1'),
+                0x1334e8: ('settingsVerify', '020080d2'),
+                0x134554: ('setupiKarwanYTKLicenseView', 'f85fbca9'),
+                0x146e58: ('_setupActivationCell:', 'ff4306d1'),
+              },
+              'true': {
+                0x133b2c: ('isValidLicenseKey:', 'f657bda9f44f01a9'),
+              }
+            }
+          }
+
+          report = {}
+          outdir = Path('patched-dylibs')
+          outdir.mkdir(exist_ok=True)
+
+          for name, cfg in targets.items():
+            path = cfg['path']
+            data = bytearray(path.read_bytes())
+            original_sha = hashlib.sha256(data).hexdigest()
+            changes = []
+
+            for off, (method, expected_hex) in cfg['void'].items():
+              expected = bytes.fromhex(expected_hex)
+              actual = bytes(data[off:off+len(expected)])
+              if actual != expected:
+                raise RuntimeError(f'{name} {method} @ {off:#x}: expected {expected.hex()}, got {actual.hex()}')
+              data[off:off+4] = RET
+              changes.append({'offset': hex(off), 'method': method, 'patch': 'return-void'})
+
+            for off, (method, expected_hex) in cfg['true'].items():
+              expected = bytes.fromhex(expected_hex)
+              actual = bytes(data[off:off+len(expected)])
+              if actual != expected:
+                raise RuntimeError(f'{name} {method} @ {off:#x}: expected {expected.hex()}, got {actual.hex()}')
+              data[off:off+8] = TRUE_RET
+              changes.append({'offset': hex(off), 'method': method, 'patch': 'return-true'})
+
+            path.write_bytes(data)
+            shutil.copy2(path, outdir / name)
+            report[name] = {
+              'original_sha256': original_sha,
+              'patched_sha256': hashlib.sha256(data).hexdigest(),
+              'size': len(data),
+              'changes': changes,
+            }
+
+          Path('patched-dylibs/PATCH_REPORT.json').write_text(json.dumps(report, indent=2))
+          print(json.dumps(report, indent=2))
+          PY
+          python patch_free.py
+          file patched-dylibs/*.dylib
+
+      - name: Validate patched gates
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          checks = {
+            Path('patched-dylibs/TTKPlus.dylib'): {
+              0x40670: 'c0035fd6', 0x40744: 'c0035fd6', 0x407f4: 'c0035fd6',
+              0x40838: 'c0035fd6', 0x4087c: 'c0035fd6', 0x42878: 'c0035fd6',
+              0x4ade0: 'c0035fd6', 0x4b924: 'c0035fd6', 0x526e8: 'c0035fd6',
+              0x4b9d8: '20008052c0035fd6',
+            },
+            Path('patched-dylibs/YTKPlus.dylib'): {
+              0x11bc90: 'c0035fd6', 0x11bd64: 'c0035fd6', 0x11be14: 'c0035fd6',
+              0x11be58: 'c0035fd6', 0x11be9c: 'c0035fd6', 0x105480: 'c0035fd6',
+              0x11e5a4: 'c0035fd6', 0x1334e8: 'c0035fd6', 0x134554: 'c0035fd6',
+              0x146e58: 'c0035fd6', 0x133b2c: '20008052c0035fd6',
+            }
+          }
+          for path, table in checks.items():
+            b = path.read_bytes()
+            for off, expected in table.items():
+              exp = bytes.fromhex(expected)
+              got = b[off:off+len(exp)]
+              assert got == exp, (path, hex(off), got.hex(), expected)
+          print('All patched method prologs validated.')
+          PY
+
+      - name: Remove stale bundle signatures and package IPAs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          find extracted/tiktok/Payload -name _CodeSignature -type d -prune -exec rm -rf {} + || true
+          find extracted/youtube/Payload -name _CodeSignature -type d -prune -exec rm -rf {} + || true
+          (
+            cd extracted/tiktok
+            zip -qry -y ../../out/TikTok_46.8_TTKillerPlus_2.1_FREE.ipa Payload
+          )
+          (
+            cd extracted/youtube
+            zip -qry -y ../../out/YouTube_21.37_YTKillerPlus_6.5_FREE.ipa Payload
+          )
+          unzip -tq out/TikTok_46.8_TTKillerPlus_2.1_FREE.ipa
+          unzip -tq out/YouTube_21.37_YTKillerPlus_6.5_FREE.ipa
+          sha256sum out/*.ipa patched-dylibs/*.dylib | tee out/SHA256SUMS.txt
+          ls -lh out/*.ipa patched-dylibs/*.dylib
+
+      - name: Upload patched tweak dylibs
         uses: actions/upload-artifact@v4
         with:
-          name: ikghd-source-ipas
-          path: downloads/*.ipa
-          retention-days: 3
+          name: patched-free-dylibs
+          path: patched-dylibs
+          retention-days: 14
 
-      - name: Upload extracted dylibs
+      - name: Upload patched TikTok IPA
         uses: actions/upload-artifact@v4
         with:
-          name: ikghd-extracted-dylibs
-          path: dylibs
+          name: TikTok-46.8-TTKillerPlus-2.1-FREE
+          path: |
+            out/TikTok_46.8_TTKillerPlus_2.1_FREE.ipa
+            out/SHA256SUMS.txt
+          retention-days: 7
+
+      - name: Upload patched YouTube IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: YouTube-21.37-YTKillerPlus-6.5-FREE
+          path: |
+            out/YouTube_21.37_YTKillerPlus_6.5_FREE.ipa
+            out/SHA256SUMS.txt
           retention-days: 7
