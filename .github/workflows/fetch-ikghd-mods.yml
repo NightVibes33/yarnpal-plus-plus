@@ -28,10 +28,9 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p downloads extracted/tiktok extracted/youtube dylibs/tiktok dylibs/youtube
-          cat > /tmp/fetch.mjs <<'JS'
+          cat > fetch.mjs <<'JS'
           import { chromium } from 'playwright';
           import fs from 'fs';
-          import path from 'path';
 
           const browser = await chromium.launch({
             headless: true,
@@ -68,8 +67,7 @@ jobs:
             const failure = await download.failure();
             if (failure) throw new Error(`Download failed: ${failure}`);
             await download.saveAs(outPath);
-            const stat = fs.statSync(outPath);
-            console.log(outPath, stat.size);
+            console.log(outPath, fs.statSync(outPath).size);
             await page.close();
           }
 
@@ -79,7 +77,6 @@ jobs:
             'downloads/TikTok_46.8_TTKillerPlus_2.1.ipa'
           );
 
-          // Resolve the YouTube package page from the repo itself so the source controls the path.
           const home = await context.newPage();
           await home.goto('https://repo.ikghd.me/', { waitUntil: 'networkidle', timeout: 90000 });
           const homeLinks = await home.locator('a').evaluateAll(as => as.map(a => ({ text: (a.textContent || '').trim(), href: a.href })));
@@ -94,7 +91,7 @@ jobs:
 
           await browser.close();
           JS
-          node /tmp/fetch.mjs
+          node fetch.mjs
           file downloads/*.ipa
           ls -lh downloads/*.ipa
 
