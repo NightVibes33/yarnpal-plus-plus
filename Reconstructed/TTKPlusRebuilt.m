@@ -1,4 +1,5 @@
 #import "KPRebuiltCommon.h"
+#import "KPBehaviorHooks.h"
 
 static NSArray<KPFeature *> *TTKFeatures(void) {
 #define F(t,k,s) [KPFeature feature:@t key:@k section:@s]
@@ -18,5 +19,6 @@ __attribute__((constructor)) static void TTKPlusRebuiltInit(void) {
     @autoreleasepool {
         [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"TTKPlus_Enabled":@YES}];
         KPInstallFloatingWheel(@"TTKillerPlus", ^NSArray<KPFeature *> *{ return TTKFeatures(); }, @"TTKPlus.Rebuilt.Free", 0x54544B50);
+        KPInstallTTKBehaviorHooks();
     }
 }
