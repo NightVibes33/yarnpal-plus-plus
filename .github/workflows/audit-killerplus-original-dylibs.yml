@@ -1,0 +1,251 @@
+name: Audit original KillerPlus dylibs
+
+on:
+  push:
+    branches:
+      - temp/killerplus-dylib-audit
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit-and-clone:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install browser tooling
+        shell: bash
+        run: |
+          set -euxo pipefail
+          npm init -y >/dev/null 2>&1
+          npm install playwright@latest
+          npx playwright install chromium
+
+      - name: Download untouched source IPAs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p downloads extracted/tiktok extracted/youtube originals clones audit/TTKPlus audit/YTKPlus
+          cat > fetch.mjs <<'JS'
+          import { chromium } from 'playwright';
+          import fs from 'fs';
+
+          const browser = await chromium.launch({
+            headless: true,
+            args: ['--disable-blink-features=AutomationControlled', '--no-sandbox']
+          });
+          const context = await browser.newContext({
+            acceptDownloads: true,
+            locale: 'en-US',
+            timezoneId: 'America/Chicago',
+            userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
+            viewport: { width: 1440, height: 1000 },
+            extraHTTPHeaders: {
+              'Accept-Language': 'en-US,en;q=0.9',
+              'Upgrade-Insecure-Requests': '1'
+            }
+          });
+
+          async function saveDownload(download, outPath) {
+            const failure = await download.failure();
+            if (failure) throw new Error(`Download failed: ${failure}`);
+            await download.saveAs(outPath);
+            console.log(outPath, fs.statSync(outPath).size);
+          }
+
+          async function downloadFromPackage(pageUrl, filename, outPath) {
+            const page = await context.newPage();
+            const resp = await page.goto(pageUrl, { waitUntil: 'networkidle', timeout: 90000 });
+            console.log('page status', resp?.status(), pageUrl);
+            await page.waitForTimeout(1200);
+            const links = await page.locator('a').evaluateAll(as => as.map(a => ({ text: (a.textContent || '').trim(), href: a.href })));
+            const target = links.find(x => x.href.includes(filename));
+            if (!target) throw new Error(`Could not find ${filename} on ${pageUrl}`);
+            const [download] = await Promise.all([
+              page.waitForEvent('download', { timeout: 120000 }),
+              page.locator(`a[href="${target.href}"]`).first().click({ timeout: 30000 })
+            ]);
+            await saveDownload(download, outPath);
+            await page.close();
+          }
+
+          async function downloadDirectFromRepoPage(fileUrl, outPath) {
+            const page = await context.newPage();
+            const resp = await page.goto('https://repo.ikghd.me/', { waitUntil: 'networkidle', timeout: 90000 });
+            console.log('repo page status', resp?.status());
+            await page.evaluate((href) => {
+              const a = document.createElement('a');
+              a.id = 'direct-source-download';
+              a.href = href;
+              a.textContent = 'Download';
+              document.body.appendChild(a);
+            }, fileUrl);
+            const [download] = await Promise.all([
+              page.waitForEvent('download', { timeout: 120000 }),
+              page.locator('#direct-source-download').click({ timeout: 30000 })
+            ]);
+            await saveDownload(download, outPath);
+            await page.close();
+          }
+
+          await downloadFromPackage(
+            'https://repo.ikghd.me/TTKPlus',
+            'TikTok_46.8_TTKillerPlus_2.1.ipa',
+            'downloads/TikTok_46.8_TTKillerPlus_2.1.ipa'
+          );
+
+          await downloadDirectFromRepoPage(
+            'https://ikghd.site/ipa/YouTube_21.37_YTKillerPlus_6.5.ipa',
+            'downloads/YouTube_21.37_YTKillerPlus_6.5.ipa'
+          );
+
+          await browser.close();
+          JS
+          node fetch.mjs
+
+      - name: Extract untouched original dylibs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          unzip -q downloads/TikTok_46.8_TTKillerPlus_2.1.ipa -d extracted/tiktok
+          unzip -q downloads/YouTube_21.37_YTKillerPlus_6.5.ipa -d extracted/youtube
+          cp extracted/tiktok/Payload/TikTok.app/Frameworks/TTKPlus.dylib originals/TTKPlus.dylib
+          cp extracted/youtube/Payload/YouTube.app/Frameworks/YTKPlus.dylib originals/YTKPlus.dylib
+          file originals/*.dylib
+          shasum -a 256 originals/*.dylib | tee audit/original-sha256.txt
+
+      - name: Verify known original hashes
+        shell: bash
+        run: |
+          set -euxo pipefail
+          echo '0f7e30a14d041788177085ba499a1d04aa7c084b4eacc43adbac87355da29e5d  originals/TTKPlus.dylib' | shasum -a 256 -c -
+          echo '500f0768ac611319ddc916896df3687598866cac5e187467f10ab49e230ae4d1  originals/YTKPlus.dylib' | shasum -a 256 -c -
+
+      - name: Produce byte-identical clones
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cp -p originals/TTKPlus.dylib clones/TTKPlus.byte-identical.dylib
+          cp -p originals/YTKPlus.dylib clones/YTKPlus.byte-identical.dylib
+          cmp -s originals/TTKPlus.dylib clones/TTKPlus.byte-identical.dylib
+          cmp -s originals/YTKPlus.dylib clones/YTKPlus.byte-identical.dylib
+          shasum -a 256 clones/*.dylib | tee audit/clone-sha256.txt
+
+      - name: Full Mach-O and Objective-C audit
+        shell: bash
+        run: |
+          set -euxo pipefail
+          audit_one() {
+            local bin="$1"
+            local name="$2"
+            local dir="audit/$name"
+            mkdir -p "$dir"
+
+            file "$bin" > "$dir/file.txt"
+            stat -f 'size=%z bytes mode=%Sp mtime=%Sm' "$bin" > "$dir/stat.txt"
+            shasum -a 256 "$bin" > "$dir/sha256.txt"
+            xcrun dwarfdump --uuid "$bin" > "$dir/uuid.txt" 2>&1 || true
+            otool -hv "$bin" > "$dir/mach-header.txt" 2>&1 || true
+            otool -l "$bin" > "$dir/load-commands.txt" 2>&1 || true
+            otool -L "$bin" > "$dir/dependencies.txt" 2>&1 || true
+            otool -D "$bin" > "$dir/install-name.txt" 2>&1 || true
+            otool -Iv "$bin" > "$dir/indirect-symbols.txt" 2>&1 || true
+            otool -ov "$bin" > "$dir/objc-runtime.txt" 2>&1 || true
+            nm -nm "$bin" > "$dir/nm-all.txt" 2>&1 || true
+            nm -gjU "$bin" > "$dir/nm-undefined.txt" 2>&1 || true
+            strings -a "$bin" > "$dir/strings.txt" 2>&1 || true
+            codesign -dvvv "$bin" > "$dir/codesign.txt" 2>&1 || true
+            codesign -d --entitlements :- "$bin" > "$dir/entitlements.plist" 2>&1 || true
+            xcrun size -m "$bin" > "$dir/segments-size.txt" 2>&1 || true
+
+            if xcrun --find dyld_info >/dev/null 2>&1; then
+              xcrun dyld_info -exports "$bin" > "$dir/dyld-exports.txt" 2>&1 || true
+              xcrun dyld_info -imports "$bin" > "$dir/dyld-imports.txt" 2>&1 || true
+              xcrun dyld_info -fixups "$bin" > "$dir/dyld-fixups.txt" 2>&1 || true
+            fi
+
+            if xcrun --find llvm-objdump >/dev/null 2>&1; then
+              xcrun llvm-objdump --macho --private-headers "$bin" > "$dir/llvm-private-headers.txt" 2>&1 || true
+              xcrun llvm-objdump --macho --syms "$bin" > "$dir/llvm-symbols.txt" 2>&1 || true
+              xcrun llvm-objdump --macho --dylibs-used "$bin" > "$dir/llvm-dylibs-used.txt" 2>&1 || true
+              xcrun llvm-objdump --macho --disassemble --no-show-raw-insn "$bin" > "$dir/disassembly.txt" 2>&1 || true
+            else
+              otool -tvV "$bin" > "$dir/disassembly.txt" 2>&1 || true
+            fi
+
+            grep -Eai 'wheel|setting|menu|present|controller|download|region|country|badge|profile|story|message|live|loop|warning|recommend|follow|like|inbox|create|friend|cache|clean|language|appearance|flex' "$dir/strings.txt" \
+              | sort -fu > "$dir/feature-surface-strings.txt" || true
+
+            grep -Eai '(^|[^A-Za-z])(class|selector|method|protocol|category|ivar|property)' "$dir/objc-runtime.txt" \
+              > "$dir/objc-index.txt" || true
+          }
+
+          audit_one originals/TTKPlus.dylib TTKPlus
+          audit_one originals/YTKPlus.dylib YTKPlus
+
+      - name: Build audit manifest
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json
+
+          items = []
+          for original_name, clone_name in [
+              ('TTKPlus.dylib', 'TTKPlus.byte-identical.dylib'),
+              ('YTKPlus.dylib', 'YTKPlus.byte-identical.dylib')]:
+              original = Path('originals') / original_name
+              clone = Path('clones') / clone_name
+              ob = original.read_bytes()
+              cb = clone.read_bytes()
+              items.append({
+                  'original': str(original),
+                  'clone': str(clone),
+                  'size': len(ob),
+                  'original_sha256': hashlib.sha256(ob).hexdigest(),
+                  'clone_sha256': hashlib.sha256(cb).hexdigest(),
+                  'byte_identical': ob == cb,
+              })
+
+          manifest = {
+              'purpose': 'Untouched original dylib audit and byte-identical clone verification',
+              'note': 'No licensing, authentication, payment, menu, or feature logic is modified.',
+              'items': items,
+          }
+          Path('audit/MANIFEST.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          print(json.dumps(manifest, indent=2))
+          assert all(x['byte_identical'] for x in items)
+          PY
+
+      - name: Package audit bundle
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ditto -c -k --sequesterRsrc --keepParent audit KillerPlus-dylib-audit.zip
+          ditto -c -k --sequesterRsrc --keepParent clones KillerPlus-byte-identical-dylib-clones.zip
+          shasum -a 256 KillerPlus-*.zip | tee PACKAGE_SHA256SUMS.txt
+
+      - name: Upload byte-identical dylib clones
+        uses: actions/upload-artifact@v4
+        with:
+          name: KillerPlus-byte-identical-dylib-clones
+          path: |
+            clones/
+            audit/MANIFEST.json
+            audit/original-sha256.txt
+            audit/clone-sha256.txt
+          retention-days: 30
+
+      - name: Upload complete dylib audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: KillerPlus-original-dylib-audit
+          path: |
+            audit/
+            KillerPlus-dylib-audit.zip
+            PACKAGE_SHA256SUMS.txt
+          retention-days: 30
