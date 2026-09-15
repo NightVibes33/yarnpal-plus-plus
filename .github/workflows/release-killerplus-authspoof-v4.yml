@@ -1,0 +1,164 @@
+name: Publish KillerPlus AuthSpoof v4
+
+on:
+  push:
+    branches:
+      - temp/ikghd-free-release
+    paths:
+      - .github/workflows/release-killerplus-authspoof-v4.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install browser tooling
+        shell: bash
+        run: |
+          set -euxo pipefail
+          npm init -y >/dev/null 2>&1
+          npm install playwright@latest
+          npx playwright install chromium
+
+      - name: Download untouched source IPAs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p downloads work/tiktok work/youtube out
+          cat > fetch.mjs <<'JS'
+          import { chromium } from 'playwright';
+          import fs from 'fs';
+          const browser = await chromium.launch({headless:true,args:['--disable-blink-features=AutomationControlled','--no-sandbox']});
+          const context = await browser.newContext({acceptDownloads:true,locale:'en-US',timezoneId:'America/Chicago',userAgent:'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'});
+          async function save(d,out){const f=await d.failure();if(f)throw new Error(f);await d.saveAs(out);console.log(out,fs.statSync(out).size)}
+          async function packageDownload(pageUrl,filename,out){const p=await context.newPage();await p.goto(pageUrl,{waitUntil:'networkidle',timeout:90000});const links=await p.locator('a').evaluateAll(as=>as.map(a=>a.href));const href=links.find(x=>x.includes(filename));if(!href)throw new Error('missing '+filename);const [d]=await Promise.all([p.waitForEvent('download',{timeout:120000}),p.locator(`a[href="${href}"]`).first().click({timeout:30000})]);await save(d,out);await p.close()}
+          async function direct(url,out){const p=await context.newPage();await p.goto('https://repo.ikghd.me/',{waitUntil:'networkidle',timeout:90000});await p.evaluate(h=>{const a=document.createElement('a');a.id='d';a.href=h;a.textContent='download';document.body.appendChild(a)},url);const [d]=await Promise.all([p.waitForEvent('download',{timeout:120000}),p.locator('#d').click()]);await save(d,out);await p.close()}
+          await packageDownload('https://repo.ikghd.me/TTKPlus','TikTok_46.8_TTKillerPlus_2.1.ipa','downloads/tiktok.ipa');
+          await direct('https://ikghd.site/ipa/YouTube_21.37_YTKillerPlus_6.5.ipa','downloads/youtube.ipa');
+          await browser.close();
+          JS
+          node fetch.mjs
+          unzip -q downloads/tiktok.ipa -d work/tiktok
+          unzip -q downloads/youtube.ipa -d work/youtube
+          test -f work/tiktok/Payload/TikTok.app/Frameworks/TTKPlus.dylib
+          test -f work/youtube/Payload/YouTube.app/Frameworks/YTKPlus.dylib
+          test -f work/tiktok/Payload/TikTok.app/Frameworks/CydiaSubstrate.framework/CydiaSubstrate
+          test -f work/youtube/Payload/YouTube.app/Frameworks/CydiaSubstrate.framework/CydiaSubstrate
+
+      - name: Patch paid-state decisions only and prove byte scope
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib, shutil, json
+
+          OLD=b'@rpath/CydiaSubstrate.framework/CydiaSubstrate\0'
+          NEW=b'@loader_path/CydiaSubstrate.dylib\0'
+          NOP=bytes.fromhex('1f2003d5')
+          TRUE_RET=bytes.fromhex('20008052c0035fd6')
+          YTK_STUB=bytes.fromhex('fd7bbda9f44f01a9f51300f9fd030091131040f9a0b7009000c01d916aec4094c0ef409422008052010d4194f50300aa68b800b000fd43f9baef4094e20315aac30c4194f40300aa020080d2702a4194e00313aae20314aa23008052040080d2e3174194e00314aaf3ef4094e00315aaf1ef4094f51340f9f44f41a9fd7bc3a8c0035fd6')
+          assert len(YTK_STUB)==132
+
+          def rewrite_substrate(data):
+              assert data.count(OLD)==1
+              i=data.find(OLD)
+              data[i:i+len(OLD)] = NEW + b'\0'*(len(OLD)-len(NEW))
+              return i
+
+          def assert_expected(data,off,hexbytes,label):
+              exp=bytes.fromhex(hexbytes); got=bytes(data[off:off+len(exp)])
+              if got!=exp: raise RuntimeError(f'{label} @{off:#x}: expected {exp.hex()} got {got.hex()}')
+
+          def assert_diff_scope(orig,patched,allowed,label):
+              bad=[]
+              changed=0
+              for i,(a,b) in enumerate(zip(orig,patched)):
+                  if a!=b:
+                      changed+=1
+                      if not any(lo<=i<hi for lo,hi in allowed): bad.append(i)
+              if bad: raise RuntimeError(f'{label}: changed bytes outside allowed regions: {[hex(x) for x in bad[:20]]}')
+              print(label,'changed bytes',changed,'all inside allowed regions')
+
+          report={}
+
+          # TikTok: preserve every controller/menu/payment method; only force the existing paid branch.
+          tp=Path('work/tiktok/Payload/TikTok.app/Frameworks/TTKPlus.dylib')
+          torig=tp.read_bytes()
+          assert hashlib.sha256(torig).hexdigest()=='0f7e30a14d041788177085ba499a1d04aa7c084b4eacc43adbac87355da29e5d'
+          td=bytearray(torig)
+          sub_i=rewrite_substrate(td)
+          guards={0x1999c:'f30100b4',0x199a0:'d40100b4',0x199a4:'b50100b4',0x199b8:'a0050034'}
+          for off,exp in guards.items():
+              assert_expected(td,off,exp,'TTK paid-gate branch')
+              td[off:off+4]=NOP
+          assert_expected(td,0x4b9d8,'f44fbea9fd7b01a9','TTK isValidLicenseKey')
+          td[0x4b9d8:0x4b9e0]=TRUE_RET
+          tallowed=[(sub_i,sub_i+len(OLD)),(0x1999c,0x199a8),(0x199b8,0x199bc),(0x4b9d8,0x4b9e0)]
+          assert_diff_scope(torig,td,tallowed,'TTK')
+          tp.write_bytes(td)
+          tsha=hashlib.sha256(td).hexdigest()
+          assert tsha=='f610d9b03e15e386c5f301c58bfc9edb8118f98f905a35ec642410c884ee63f5'
+          shutil.copy2('work/tiktok/Payload/TikTok.app/Frameworks/CydiaSubstrate.framework/CydiaSubstrate','work/tiktok/Payload/TikTok.app/Frameworks/CydiaSubstrate.dylib')
+          report['TTKPlus.dylib']={'source_sha256':hashlib.sha256(torig).hexdigest(),'patched_sha256':tsha,'strategy':'force existing paid branch; preserve UI/payment implementations'}
+
+          # YouTube: replace only the gear authorization-completion routine with the original paid-settings presenter.
+          yp=Path('work/youtube/Payload/YouTube.app/Frameworks/YTKPlus.dylib')
+          yorig=yp.read_bytes()
+          assert hashlib.sha256(yorig).hexdigest()=='500f0768ac611319ddc916896df3687598866cac5e187467f10ab49e230ae4d1'
+          yd=bytearray(yorig)
+          ysub_i=rewrite_substrate(yd)
+          assert_expected(yd,0x10ca14,'ff4307d1fc6f17a9fa6718a9f85f19a9','YTK gear auth completion prolog')
+          yd[0x10ca14:0x10ca14+len(YTK_STUB)]=YTK_STUB
+          assert_expected(yd,0x133b2c,'f657bda9f44f01a9','YTK isValidLicenseKey')
+          yd[0x133b2c:0x133b34]=TRUE_RET
+          yallowed=[(ysub_i,ysub_i+len(OLD)),(0x10ca14,0x10ca98),(0x133b2c,0x133b34)]
+          assert_diff_scope(yorig,yd,yallowed,'YTK')
+          yp.write_bytes(yd)
+          ysha=hashlib.sha256(yd).hexdigest()
+          assert ysha=='d70ec2dcd982c3b34b1f9db4e867c754919c8f41cbc16b15718cae76ce8dab0c'
+          shutil.copy2('work/youtube/Payload/YouTube.app/Frameworks/CydiaSubstrate.framework/CydiaSubstrate','work/youtube/Payload/YouTube.app/Frameworks/CydiaSubstrate.dylib')
+          report['YTKPlus.dylib']={'source_sha256':hashlib.sha256(yorig).hexdigest(),'patched_sha256':ysha,'strategy':'gear authorization completion presents original iKarwanYTKsettings paid controller'}
+
+          Path('out/PATCH_INFO.json').write_text(json.dumps(report,indent=2))
+          print(json.dumps(report,indent=2))
+          PY
+
+      - name: Package and independently validate full IPAs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          find work/tiktok/Payload -name _CodeSignature -type d -prune -exec rm -rf {} + || true
+          find work/youtube/Payload -name _CodeSignature -type d -prune -exec rm -rf {} + || true
+          (cd work/tiktok && zip -1qry -y ../../out/TikTok_TTKillerPlus_AuthSpoof_v4.ipa Payload)
+          (cd work/youtube && zip -1qry -y ../../out/YouTube_YTKillerPlus_AuthSpoof_v4.ipa Payload)
+          unzip -tq out/TikTok_TTKillerPlus_AuthSpoof_v4.ipa
+          unzip -tq out/YouTube_YTKillerPlus_AuthSpoof_v4.ipa
+          unzip -p out/TikTok_TTKillerPlus_AuthSpoof_v4.ipa Payload/TikTok.app/Frameworks/TTKPlus.dylib | sha256sum | grep '^f610d9b03e15e386c5f301c58bfc9edb8118f98f905a35ec642410c884ee63f5'
+          unzip -p out/YouTube_YTKillerPlus_AuthSpoof_v4.ipa Payload/YouTube.app/Frameworks/YTKPlus.dylib | sha256sum | grep '^d70ec2dcd982c3b34b1f9db4e867c754919c8f41cbc16b15718cae76ce8dab0c'
+          unzip -l out/TikTok_TTKillerPlus_AuthSpoof_v4.ipa | grep 'Frameworks/CydiaSubstrate.dylib'
+          unzip -l out/YouTube_YTKillerPlus_AuthSpoof_v4.ipa | grep 'Frameworks/CydiaSubstrate.dylib'
+          sha256sum out/*.ipa | tee out/SHA256SUMS.txt
+          ls -lh out/*.ipa
+
+      - name: Publish GitHub Release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          TAG='killerplus-authspoof-v4'
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" out/TikTok_TTKillerPlus_AuthSpoof_v4.ipa out/YouTube_YTKillerPlus_AuthSpoof_v4.ipa out/PATCH_INFO.json out/SHA256SUMS.txt --clobber
+          else
+            gh release create "$TAG" out/TikTok_TTKillerPlus_AuthSpoof_v4.ipa out/YouTube_YTKillerPlus_AuthSpoof_v4.ipa out/PATCH_INFO.json out/SHA256SUMS.txt \
+              --target "$GITHUB_SHA" \
+              --title 'KillerPlus AuthSpoof v4' \
+              --notes 'Forces the original paid/settings path while preserving menu and payment controller implementations. Includes the flat CydiaSubstrate loader fix for LiveContainer. CI rejects any binary changes outside the explicitly allowed auth/license/load-path regions.'
+          fi
+          gh release view "$TAG" --json url,assets
