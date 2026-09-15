@@ -1,0 +1,174 @@
+name: Package reconstructed KillerPlus IPAs
+
+on:
+  push:
+    branches: [temp/killerplus-reconstructed-free]
+    paths:
+      - '.github/workflows/package-killerplus-reconstructed-ipas.yml'
+      - 'Reconstructed/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install browser tooling
+        shell: bash
+        run: |
+          set -euxo pipefail
+          npm init -y >/dev/null 2>&1
+          npm install playwright@latest >/dev/null
+          npx playwright install chromium
+
+      - name: Download untouched source IPAs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p downloads work/tiktok work/youtube out
+          cat > fetch.mjs <<'JS'
+          import { chromium } from 'playwright';
+          import fs from 'fs';
+
+          const browser = await chromium.launch({
+            headless: true,
+            args: ['--disable-blink-features=AutomationControlled', '--no-sandbox']
+          });
+          const context = await browser.newContext({
+            acceptDownloads: true,
+            locale: 'en-US',
+            timezoneId: 'America/Chicago',
+            userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
+          });
+
+          async function saveDownload(download, outPath) {
+            const failure = await download.failure();
+            if (failure) throw new Error(`Download failed: ${failure}`);
+            await download.saveAs(outPath);
+            console.log(outPath, fs.statSync(outPath).size);
+          }
+
+          async function downloadFromPackage(pageUrl, filename, outPath) {
+            const page = await context.newPage();
+            await page.goto(pageUrl, { waitUntil: 'networkidle', timeout: 90000 });
+            const links = await page.locator('a').evaluateAll(as => as.map(a => ({ text: (a.textContent || '').trim(), href: a.href })));
+            const target = links.find(x => x.href.includes(filename));
+            if (!target) throw new Error(`Could not find ${filename} on ${pageUrl}`);
+            const [download] = await Promise.all([
+              page.waitForEvent('download', { timeout: 120000 }),
+              page.locator(`a[href="${target.href}"]`).first().click({ timeout: 30000 })
+            ]);
+            await saveDownload(download, outPath);
+            await page.close();
+          }
+
+          async function downloadDirect(fileUrl, outPath) {
+            const page = await context.newPage();
+            await page.goto('https://repo.ikghd.me/', { waitUntil: 'networkidle', timeout: 90000 });
+            await page.evaluate((href) => {
+              const a = document.createElement('a');
+              a.id = 'direct-source-download';
+              a.href = href;
+              a.textContent = 'Download';
+              document.body.appendChild(a);
+            }, fileUrl);
+            const [download] = await Promise.all([
+              page.waitForEvent('download', { timeout: 120000 }),
+              page.locator('#direct-source-download').click({ timeout: 30000 })
+            ]);
+            await saveDownload(download, outPath);
+            await page.close();
+          }
+
+          await downloadFromPackage(
+            'https://repo.ikghd.me/TTKPlus',
+            'TikTok_46.8_TTKillerPlus_2.1.ipa',
+            'downloads/TikTok_46.8_TTKillerPlus_2.1.ipa'
+          );
+          await downloadDirect(
+            'https://ikghd.site/ipa/YouTube_21.37_YTKillerPlus_6.5.ipa',
+            'downloads/YouTube_21.37_YTKillerPlus_6.5.ipa'
+          );
+          await browser.close();
+          JS
+          node fetch.mjs
+          unzip -q downloads/TikTok_46.8_TTKillerPlus_2.1.ipa -d work/tiktok
+          unzip -q downloads/YouTube_21.37_YTKillerPlus_6.5.ipa -d work/youtube
+          test -f work/tiktok/Payload/TikTok.app/Frameworks/TTKPlus.dylib
+          test -f work/youtube/Payload/YouTube.app/Frameworks/YTKPlus.dylib
+
+      - name: Build fresh reconstructed dylibs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p rebuilt
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          COMMON=(-arch arm64 -isysroot "$SDK" -miphoneos-version-min=15.0 -fobjc-arc -dynamiclib -framework Foundation -framework UIKit -Wl,-dead_strip)
+          xcrun clang "${COMMON[@]}" Reconstructed/KPRebuiltCommon.m Reconstructed/KPRecoveredHooks.m Reconstructed/TTKPlusRebuilt.m -install_name @rpath/TTKPlus.dylib -o rebuilt/TTKPlus.dylib
+          xcrun clang "${COMMON[@]}" Reconstructed/KPRebuiltCommon.m Reconstructed/KPRecoveredHooks.m Reconstructed/YTKPlusRebuilt.m -install_name @rpath/YTKPlus.dylib -o rebuilt/YTKPlus.dylib
+          file rebuilt/*.dylib
+          shasum -a 256 rebuilt/*.dylib | tee out/REBUILT_DYLIB_SHA256.txt
+          ! strings rebuilt/TTKPlus.dylib | grep -Eiq 'paypal|checkout|license key|subscription|paymentHandler|promptForActivation'
+          ! strings rebuilt/YTKPlus.dylib | grep -Eiq 'paypal|checkout|license key|subscription|paymentHandler|promptForActivation'
+
+      - name: Replace original tweak dylibs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          TTK=work/tiktok/Payload/TikTok.app/Frameworks/TTKPlus.dylib
+          YTK=work/youtube/Payload/YouTube.app/Frameworks/YTKPlus.dylib
+          rm -f "$TTK" "$YTK"
+          cp rebuilt/TTKPlus.dylib "$TTK"
+          cp rebuilt/YTKPlus.dylib "$YTK"
+          cmp rebuilt/TTKPlus.dylib "$TTK"
+          cmp rebuilt/YTKPlus.dylib "$YTK"
+          test "$(shasum -a 256 rebuilt/TTKPlus.dylib | awk '{print $1}')" = "$(shasum -a 256 "$TTK" | awk '{print $1}')"
+          test "$(shasum -a 256 rebuilt/YTKPlus.dylib | awk '{print $1}')" = "$(shasum -a 256 "$YTK" | awk '{print $1}')"
+
+      - name: Remove stale signatures and package IPAs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          find work/tiktok/Payload -name _CodeSignature -type d -prune -exec rm -rf {} + || true
+          find work/youtube/Payload -name _CodeSignature -type d -prune -exec rm -rf {} + || true
+          rm -f work/tiktok/Payload/TikTok.app/embedded.mobileprovision || true
+          rm -f work/youtube/Payload/YouTube.app/embedded.mobileprovision || true
+          (
+            cd work/tiktok
+            zip -qry -y ../../out/TikTok_46.8_TTKillerPlus_ReconstructedFree.ipa Payload
+          )
+          (
+            cd work/youtube
+            zip -qry -y ../../out/YouTube_21.37_YTKillerPlus_ReconstructedFree.ipa Payload
+          )
+          unzip -tq out/TikTok_46.8_TTKillerPlus_ReconstructedFree.ipa
+          unzip -tq out/YouTube_21.37_YTKillerPlus_ReconstructedFree.ipa
+          shasum -a 256 out/*.ipa | tee out/IPA_SHA256.txt
+          ls -lh out/*.ipa
+
+      - name: Verify packaged dylibs are reconstructed versions
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf verify && mkdir -p verify/tiktok verify/youtube
+          unzip -q out/TikTok_46.8_TTKillerPlus_ReconstructedFree.ipa -d verify/tiktok
+          unzip -q out/YouTube_21.37_YTKillerPlus_ReconstructedFree.ipa -d verify/youtube
+          cmp rebuilt/TTKPlus.dylib verify/tiktok/Payload/TikTok.app/Frameworks/TTKPlus.dylib
+          cmp rebuilt/YTKPlus.dylib verify/youtube/Payload/YouTube.app/Frameworks/YTKPlus.dylib
+          ! strings verify/tiktok/Payload/TikTok.app/Frameworks/TTKPlus.dylib | grep -Eiq 'paypal|checkout|license key|subscription|paymentHandler|promptForActivation'
+          ! strings verify/youtube/Payload/YouTube.app/Frameworks/YTKPlus.dylib | grep -Eiq 'paypal|checkout|license key|subscription|paymentHandler|promptForActivation'
+
+      - name: Upload rebuilt IPAs
+        uses: actions/upload-artifact@v4
+        with:
+          name: KillerPlus-reconstructed-free-IPAs
+          path: |
+            out/TikTok_46.8_TTKillerPlus_ReconstructedFree.ipa
+            out/YouTube_21.37_YTKillerPlus_ReconstructedFree.ipa
+            out/IPA_SHA256.txt
+            out/REBUILT_DYLIB_SHA256.txt
+          retention-days: 30
