@@ -1,0 +1,48 @@
+name: Split reconstructed IPA artifacts
+
+on:
+  push:
+    branches: [temp/killerplus-reconstructed-free]
+    paths:
+      - '.github/workflows/split-killerplus-ipa-artifacts.yml'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  split:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download verified combined artifact from successful packaging run
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p recovered
+          gh run download 34927974257 --repo NightVibes33/yarnpal-plus-plus --name KillerPlus-reconstructed-free-IPAs --dir recovered
+          test -f recovered/TikTok_46.8_TTKillerPlus_ReconstructedFree.ipa
+          test -f recovered/YouTube_21.37_YTKillerPlus_ReconstructedFree.ipa
+          sha256sum recovered/*.ipa | tee recovered/IPA_SHA256_RECHECK.txt
+          ls -lh recovered/*.ipa
+      - name: Upload TikTok IPA separately
+        uses: actions/upload-artifact@v4
+        with:
+          name: TikTok-46.8-TTKillerPlus-ReconstructedFree
+          path: |
+            recovered/TikTok_46.8_TTKillerPlus_ReconstructedFree.ipa
+            recovered/IPA_SHA256_RECHECK.txt
+          compression-level: 0
+          retention-days: 30
+      - name: Upload YouTube IPA separately
+        uses: actions/upload-artifact@v4
+        with:
+          name: YouTube-21.37-YTKillerPlus-ReconstructedFree
+          path: |
+            recovered/YouTube_21.37_YTKillerPlus_ReconstructedFree.ipa
+            recovered/IPA_SHA256_RECHECK.txt
+          compression-level: 0
+          retention-days: 30
