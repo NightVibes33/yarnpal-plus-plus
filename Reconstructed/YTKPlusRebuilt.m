@@ -1,4 +1,5 @@
 #import "KPRebuiltCommon.h"
+#import "KPBehaviorHooks.h"
 
 static NSArray<KPFeature *> *YTKFeatures(void) {
 #define F(t,k,s) [KPFeature feature:@t key:@k section:@s]
@@ -16,5 +17,8 @@ static NSArray<KPFeature *> *YTKFeatures(void) {
 }
 
 __attribute__((constructor)) static void YTKPlusRebuiltInit(void) {
-    @autoreleasepool { KPInstallFloatingWheel(@"YTKillerPlus", ^NSArray<KPFeature *> *{ return YTKFeatures(); }, @"YTKPlus.Rebuilt.Free", 0x59544B50); }
+    @autoreleasepool {
+        KPInstallFloatingWheel(@"YTKillerPlus", ^NSArray<KPFeature *> *{ return YTKFeatures(); }, @"YTKPlus.Rebuilt.Free", 0x59544B50);
+        KPInstallYTKBehaviorHooks();
+    }
 }
