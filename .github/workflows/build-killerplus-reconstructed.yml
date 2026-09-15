@@ -17,8 +17,8 @@ jobs:
           mkdir -p out
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           COMMON=(-arch arm64 -isysroot "$SDK" -miphoneos-version-min=15.0 -fobjc-arc -dynamiclib -framework Foundation -framework UIKit -Wl,-dead_strip)
-          xcrun clang "${COMMON[@]}" Reconstructed/KPRebuiltCommon.m Reconstructed/TTKPlusRebuilt.m -install_name @rpath/TTKPlus.dylib -o out/TTKPlus.dylib
-          xcrun clang "${COMMON[@]}" Reconstructed/KPRebuiltCommon.m Reconstructed/YTKPlusRebuilt.m -install_name @rpath/YTKPlus.dylib -o out/YTKPlus.dylib
+          xcrun clang "${COMMON[@]}" Reconstructed/KPRebuiltCommon.m Reconstructed/KPBehaviorHooks.m Reconstructed/TTKPlusRebuilt.m -install_name @rpath/TTKPlus.dylib -o out/TTKPlus.dylib
+          xcrun clang "${COMMON[@]}" Reconstructed/KPRebuiltCommon.m Reconstructed/KPBehaviorHooks.m Reconstructed/YTKPlusRebuilt.m -install_name @rpath/YTKPlus.dylib -o out/YTKPlus.dylib
           file out/*.dylib
           otool -L out/*.dylib | tee out/DEPENDENCIES.txt
           shasum -a 256 out/*.dylib | tee out/SHA256SUMS.txt
@@ -30,6 +30,8 @@ jobs:
           set -euxo pipefail
           strings out/TTKPlus.dylib | grep -q 'TTKPlus_AdBlock'
           strings out/TTKPlus.dylib | grep -q 'TTKPlus_DownloadButton'
+          strings out/TTKPlus.dylib | grep -q 'p_shouldReportProfileView'
+          strings out/TTKPlus.dylib | grep -q 'onFollowViewClicked:'
           strings out/YTKPlus.dylib | grep -q 'kEnableiKarwanNoAds'
           strings out/YTKPlus.dylib | grep -q 'kEnableiKGHDYTKPiP'
           strings out/YTKPlus.dylib | grep -q 'kEnableiKGHDsponsorBlock'
