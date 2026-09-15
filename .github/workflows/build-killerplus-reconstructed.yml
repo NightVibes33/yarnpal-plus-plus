@@ -1,0 +1,40 @@
+name: Build reconstructed KillerPlus dylibs
+on:
+  push:
+    branches: [temp/killerplus-reconstructed-free]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build arm64 iOS dylibs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p out
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          COMMON=(-arch arm64 -isysroot "$SDK" -miphoneos-version-min=15.0 -fobjc-arc -dynamiclib -framework Foundation -framework UIKit -Wl,-dead_strip)
+          xcrun clang "${COMMON[@]}" Reconstructed/KPRebuiltCommon.m Reconstructed/TTKPlusRebuilt.m -install_name @rpath/TTKPlus.dylib -o out/TTKPlus.dylib
+          xcrun clang "${COMMON[@]}" Reconstructed/KPRebuiltCommon.m Reconstructed/YTKPlusRebuilt.m -install_name @rpath/YTKPlus.dylib -o out/YTKPlus.dylib
+          file out/*.dylib
+          otool -L out/*.dylib | tee out/DEPENDENCIES.txt
+          shasum -a 256 out/*.dylib | tee out/SHA256SUMS.txt
+          ! strings out/TTKPlus.dylib | grep -Eiq 'paypal|checkout|license key|subscription|paymentHandler|promptForActivation'
+          ! strings out/YTKPlus.dylib | grep -Eiq 'paypal|checkout|license key|subscription|paymentHandler|promptForActivation'
+      - name: Verify wheel/menu symbols and recovered preference keys
+        shell: bash
+        run: |
+          set -euxo pipefail
+          strings out/TTKPlus.dylib | grep -q 'TTKPlus_AdBlock'
+          strings out/TTKPlus.dylib | grep -q 'TTKPlus_DownloadButton'
+          strings out/YTKPlus.dylib | grep -q 'kEnableiKarwanNoAds'
+          strings out/YTKPlus.dylib | grep -q 'kEnableiKGHDYTKPiP'
+          strings out/YTKPlus.dylib | grep -q 'kEnableiKGHDsponsorBlock'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KillerPlus-reconstructed-free-dylibs
+          path: out
+          retention-days: 30
