@@ -31,7 +31,7 @@ const server=http.createServer(async(req,res)=>{
       if((state.wallets[auth]||0)<100)return done(409,{error:"insufficient"});
       state.wallets[auth]-=100;save();return done(200,{credits:state.wallets[auth]});
     }
-    if(req.url==="/balance"&&req.method==="GET")return done(200,{credits:state.wallets[auth]||0});
+    if((req.url==="/api/rest/user/points/info" || req.url==="/balance")&&req.method==="GET")return done(200,{credits:state.wallets[auth]||0});
     done(404,{error:"Not found"});
   }catch(e){done(500,{error:String(e)});}
 });

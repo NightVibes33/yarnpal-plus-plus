@@ -1,0 +1,32 @@
+name: VIXO Live API Read-Only Verification
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "vixo-live/**"
+      - ".github/workflows/vixo-live-readonly.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  readonly-api:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Verify probe never sends production mutations
+        run: node --test vixo-live/probe.test.mjs
+      - name: Probe real hosts and anonymous credit-info response status
+        run: node vixo-live/probe.mjs --json-file vixo-live/qa-results.json
+      - name: Upload status-only response evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vixo-live-readonly-status
+          path: vixo-live/qa-results.json
+          if-no-files-found: warn

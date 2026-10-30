@@ -60,7 +60,7 @@ import Foundation
                 let token = login["token"] as! String
                 let session = try await request("session", ["launchId": launchId], token)
                 let grant = try await request("grant", [:], token)
-                let balance = try await request("balance", [:], token, method: "GET")
+                let balance = try await request("api/rest/user/points/info", [:], token, method: "GET")
                 let spend = try await request("spend", ["amount": 100], token)
                 accounts.append(["uid": uid, "session": session["id"] as! String,
                                  "registered": session["registered"] as! Bool,
