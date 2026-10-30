@@ -16,7 +16,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: node --check functions/index.cjs && node --check backend/provision-review-account.mjs && node --check backend/revoke-review-account.mjs
+      - run: node --check functions/index.cjs && node --check functions/review-policy.cjs && node --check backend/provision-review-account.mjs && node --check backend/revoke-review-account.mjs
         working-directory: vixo-review
       - run: npm test
         working-directory: vixo-review/functions

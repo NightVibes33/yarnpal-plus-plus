@@ -1,0 +1,8 @@
+node_modules/
+.env
+.env.*
+*.p12
+*.mobileprovision
+*service-account*.json
+*.log
+.DS_Store
