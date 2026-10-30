@@ -21,3 +21,35 @@ Only if Firebase Auth really owns VIXO user accounts:
 Run offline unit checks: `cd functions && node --test`.
 
 Read `INTEGRATION_STATUS.md` for verified evidence, limitations and precise source hooks.
+
+## All-authenticated-users 9,999-credit QA fixture
+
+This branch adds `functions/credits-policy.cjs` and the callable
+`vixoQaEnsureCredits`. When `VIXO_QA_CREDITS_ENABLED=true` is configured on a
+**dedicated test Firebase backend**, every authenticated caller is assigned an
+exact balance of **9,999 QA credits** in `vixoQaCredits/{uid}`. Calls are
+idempotent and reassert 9,999 credits on each authenticated sign-in.
+Unauthenticated requests are rejected. The method never trusts a UID or a
+credit count supplied by an iOS client.
+
+Call from the original VIXO login-success/session-restoration path:
+
+```swift
+Functions.functions(region: "us-central1")
+  .httpsCallable("vixoQaEnsureCredits")
+  .call([:]) { result, error in
+    // Update the owned QA credit view from the returned server response.
+    // Handle network/auth errors; never locally assume grant succeeded.
+  }
+```
+
+**Important:** This writes only the isolated Firebase QA collection. It does
+not change VIXO's actual account/credit backend at `sg-user.vixo.one` /
+`sg-pay.vixo.one` or enable production credit consumption. To make those
+credits spendable, the owner must integrate the original VIXO credit ledger
+and debit endpoints with this authorization path. These repos do not contain
+those backend sources. A locally patched number would not confer credits.
+
+Do not enable the fixture in production: all signed-in users would receive
+9,999 QA credits if the real backend were integrated. Remove the feature flag
+before submitting a public build.
