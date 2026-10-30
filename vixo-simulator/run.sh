@@ -6,7 +6,7 @@ APP="$PWD/vixo-simulator/build/VixoQA.app"
 SDK="$(xcrun --sdk iphonesimulator --show-sdk-path)"
 ARCH="$(uname -m)"
 xcodebuild -version
-xcrun --sdk iphonesimulator swiftc -sdk "$SDK" -target "$ARCH-apple-ios16.0-simulator" -module-name VixoQA \
+xcrun --sdk iphonesimulator swiftc -parse-as-library -sdk "$SDK" -target "$ARCH-apple-ios16.0-simulator" -module-name VixoQA \
   vixo-simulator/Runner.swift -o "$APP/VixoQA"
 cat > "$APP/Info.plist" <<'XML'
 <?xml version="1.0" encoding="UTF-8"?>
