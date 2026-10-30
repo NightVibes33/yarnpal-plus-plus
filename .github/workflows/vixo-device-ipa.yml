@@ -1,0 +1,23 @@
+name: Build VIXO iPhoneOS QA IPA
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'vixo-device/**'
+      - '.github/workflows/vixo-device-ipa.yml'
+permissions:
+  contents: read
+jobs:
+  build-device-ipa:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile, ad-hoc sign, package and verify IPA
+        run: bash vixo-device/build-ipa.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vixo-qa-iphoneos-unsigned-ipa
+          path: vixo-device/output/Vixo-QA-iPhoneOS-UNSIGNED.ipa
+          if-no-files-found: warn
