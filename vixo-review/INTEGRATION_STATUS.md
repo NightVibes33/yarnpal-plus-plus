@@ -27,3 +27,18 @@
 5. Create the account in the backend and enter its credentials in App Store Connect's review instructions, verify all premium features, then submit a signed distribution build.
 
 **Do not deploy the Firebase example to project `vixo-96e94` until its owner has explicitly verified that Firebase Auth is the actual user identity authority and provided authorized admin credentials.**
+
+## Binary-confirmed production hostnames (VIXO 2.2.2 IPA)
+
+Static inspection of the supplied `Payload/Vixo.app/Vixo` Mach-O executable found these absolute URLs (URLs alone do not identify auth request paths or authorize access):
+
+- Account/identity host: `https://sg-user.vixo.one`
+- Subscription/payment host: `https://sg-pay.vixo.one`
+- General API host: `https://api.vixo.one`
+- Separately linked SDK/service hosts: `https://paysdk.ldmnq.com`, `https://usersdk.ldmnq.com`
+
+**Consequence:** This app is wired to an existing remote account/payment stack. The `firebase-admin` code in this repository is a non-integrated reference implementation; provisioning a Firebase user is NOT equivalent to provisioning a VIXO account or premium subscription. No privileged access to `sg-user.vixo.one` or `sg-pay.vixo.one` exists in this repository, the uploaded IPA, or the currently linked hosting project. Do not submit the IPA under a claim that this reference adapter unlocks premium features in production.
+
+**Completion prerequisites:** (1) original VIXO source/Xcode project or backend service repository, (2) authorized administrator access to the account and entitlement services, and (3) the app's Apple code-signing/distribution configuration. Without these, do not attempt to manufacture, forge, or locally spoof subscription entitlement or physical device identity. A fresh `virtualDeviceId` is useful for *review session records* only.
+
+**Apple review requirement:** Provide a functioning demo login with full feature access in App Store Connect. For an auto-renewable subscription, provide a second expired-subscription account to exercise the purchase flow. See https://developer.apple.com/help/app-review/before-submitting-for-review/complete-review/ .
