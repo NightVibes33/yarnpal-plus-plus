@@ -1,0 +1,23 @@
+name: VIXO Simulator Full Flow
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'vixo-simulator/**'
+      - '.github/workflows/vixo-simulator-e2e.yml'
+permissions:
+  contents: read
+jobs:
+  ios-simulator:
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run iOS simulator and local credit backend
+        run: bash vixo-simulator/run.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vixo-simulator-results
+          path: vixo-simulator/output/*
+          if-no-files-found: warn
