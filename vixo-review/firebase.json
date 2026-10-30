@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "source": "functions",
+    "codebase": "vixo-review",
+    "ignore": ["node_modules", ".git", "*.log"]
+  }
+}

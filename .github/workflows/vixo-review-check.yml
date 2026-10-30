@@ -1,0 +1,22 @@
+name: VIXO App Review adapter checks
+on:
+  push:
+    paths:
+      - "vixo-review/**"
+      - ".github/workflows/vixo-review-check.yml"
+  pull_request:
+    paths:
+      - "vixo-review/**"
+      - ".github/workflows/vixo-review-check.yml"
+jobs:
+  node-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: node --check functions/index.cjs && node --check backend/provision-review-account.mjs && node --check backend/revoke-review-account.mjs
+        working-directory: vixo-review
+      - run: npm test
+        working-directory: vixo-review/functions

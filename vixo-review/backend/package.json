@@ -1,0 +1,11 @@
+{
+  "name": "vixo-review-admin",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "provision": "node provision-review-account.mjs",
+    "revoke": "node revoke-review-account.mjs"
+  },
+  "dependencies": { "firebase-admin": "^13.5.0" }
+}
